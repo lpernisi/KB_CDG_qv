@@ -1,0 +1,13 @@
+{
+  "_descrizione": "Documento di esempio su cui provare l'estrazione. Modificalo a piacere: righe di vendita + costi certificati (kodice.costi_articolo_mese). La dashboard lo usa come caso di test. ART-C non ha costo certificato: dimostra il caso 'ricavo senza costo' (anomalia da kodice.costi_eccezioni).",
+  "competenza": { "anno": 2026, "mese": 4 },
+  "righe_vendita": [
+    { "line": 1, "codice_articolo": "ART-A", "tipo_articolo": "MERCE", "quantita": 10, "ricavo_netto": 1000.00 },
+    { "line": 2, "codice_articolo": "ART-B", "tipo_articolo": "MERCE", "quantita": 5,  "ricavo_netto": 750.00 },
+    { "line": 3, "codice_articolo": "ART-C", "tipo_articolo": "MERCE", "quantita": 4,  "ricavo_netto": 400.00 }
+  ],
+  "costi_articolo": [
+    { "codice_articolo": "ART-A", "anno": 2026, "mese": 4, "costo": 42.0 },
+    { "codice_articolo": "ART-B", "anno": 2026, "mese": 4, "costo": 90.0 }
+  ]
+}

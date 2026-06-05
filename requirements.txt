@@ -1,0 +1,7 @@
+# Orchestrazione e accesso a SQL Server
+SQLAlchemy>=2.0      # gestione connessioni
+pyodbc>=5.0          # driver SQL Server (richiede ODBC Driver di sistema)
+PyYAML>=6.0          # lettura config/settings.yaml
+python-dotenv>=1.0   # lettura del file .env
+pandas>=2.0          # solo per la verifica "a secco" (src/demo_calcolo.py)
+Flask>=3.0           # app locale di esplorazione documenti/anomalie (src/dashboard_app.py)

@@ -1,0 +1,86 @@
+# =============================================================================
+# manifest.yaml — fonte UNICA delle spiegazioni dei componenti.
+# -----------------------------------------------------------------------------
+# La dashboard viene GENERATA da questo file + il testo SQL reale delle procedure.
+# Regola: ogni componente nel registro (cfg.componenti) deve avere una voce qui,
+# e ogni voce deve puntare a un file .sql esistente. Il generatore lo verifica e
+# segnala i disallineamenti, cosi' la spiegazione non puo' scivolare dal codice.
+#
+# Campi:
+#   codice    : deve coincidere col codice_componente del registro
+#   file_sql  : la procedura reale (il cui testo viene mostrato in dashboard)
+#   sorgente  : DA DOVE prende i dati (in italiano semplice)
+#   logica    : CON CHE LOGICA li calcola (in italiano semplice, per non tecnici)
+#   simulazione: come riprodurre la logica nel pannello "caso di test" del browser
+#       tipo: costo_certificato | percentuale_ricavo | per_unita | nessuna
+#       parametro: numero usato dal tipo (es. 0.12 = 12%)
+#       nota: precisazione (es. "formula dimostrativa, da sostituire")
+# =============================================================================
+componenti:
+  - codice: COSTO_VENDUTO
+    titolo: Costo del venduto
+    file_sql: sql/components/20_comp_costo_venduto.sql
+    sorgente: >-
+      Righe di vendita (src.righe_vendita) e il costo articolo/mese GIA' CERTIFICATO
+      dal motore kodice (kodice.costi_articolo_mese), alimentato a sua volta da Mago
+      (MA_ItemsWAP per il costo medio ponderato, MA_BillOfMaterialsComp per i kit).
+    logica: >-
+      Per ogni riga di vendita: importo = quantita venduta × costo certificato dell'articolo
+      per il mese di competenza, letto da kodice.costi_articolo_mese. La risalita al mese con
+      costo disponibile e l'esplosione dei kit (distinta) sono GIA' risolte dal motore
+      (core.usp_prepara_costi). Gli articoli senza costo certificato non producono costo
+      (sono ricavo senza costo) e, se anomali, sono tracciati in kodice.costi_eccezioni.
+    simulazione:
+      tipo: costo_certificato
+
+  - codice: PROVVIGIONI
+    titolo: Provvigioni marketplace
+    file_sql: sql/components/21_comp_provvigioni.sql
+    sorgente: >-
+      Da definire: tipicamente le fee del marketplace per categoria/canale.
+    logica: >-
+      Da definire: provvigione attribuita alla riga in base alla categoria o al canale
+      di vendita. Nel codice e' ancora uno stub da adattare alla sorgente reale.
+    simulazione:
+      tipo: percentuale_ricavo
+      parametro: 0.12
+      nota: Formula DIMOSTRATIVA (12% del ricavo), solo per provare il pannello. Da sostituire.
+
+  - codice: IMBALLI
+    titolo: Costi di imballaggio
+    file_sql: sql/components/22_comp_imballi.sql
+    sorgente: >-
+      Da definire: tariffa di imballo per articolo/categoria.
+    logica: >-
+      Da definire: di norma quantita × costo imballo unitario. Nel codice e' uno stub.
+    simulazione:
+      tipo: per_unita
+      parametro: 0.50
+      nota: Formula DIMOSTRATIVA (0,50 € a unita). Da sostituire.
+
+  - codice: TRASPORTO
+    titolo: Trasporto / spedizione
+    file_sql: sql/components/23_comp_trasporto.sql
+    sorgente: >-
+      Da definire: costo vettore dal database 'trasporti' (KB_FattureVettori).
+    logica: >-
+      Da definire: il costo di spedizione del documento viene allocato alle righe con un
+      DRIVER reale (es. peso o volume della riga sul totale), non spalmato a fatturato.
+      Nel codice e' uno stub che mostra il pattern di allocazione.
+    simulazione:
+      tipo: per_unita
+      parametro: 3.0
+      nota: Formula DIMOSTRATIVA (3 € a unita). Da sostituire con l'allocazione per driver.
+
+  - codice: PUBBLICITA
+    titolo: Pubblicità / advertising
+    file_sql: sql/components/24_comp_pubblicita.sql
+    sorgente: >-
+      Da definire: spesa pubblicitaria (es. per campagna/canale).
+    logica: >-
+      Da definire: la spesa pubblicitaria del periodo viene allocata alle righe con un
+      DRIVER reale (es. fatturato di canale, numero ordini), non spalmata indistintamente.
+      Nel codice e' uno stub da adattare.
+    simulazione:
+      tipo: nessuna
+      nota: "Logica non ancora definita: non simulabile finche' non e' specificata."

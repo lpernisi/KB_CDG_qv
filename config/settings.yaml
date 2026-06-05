@@ -1,0 +1,21 @@
+# =============================================================================
+# Configurazione CDG_QV
+# Parametri NON segreti. Le credenziali stanno nel file .env.
+# =============================================================================
+
+istanza:
+  driver: "ODBC Driver 17 for SQL Server"   # verifica il driver ODBC installato
+  server: "NOME_SERVER\\ISTANZA"             # es. "SQLSRV01\\PROD" oppure "localhost"
+  trusted_connection: true                   # true = autenticazione Windows; false = usa DB_USER/DB_PASSWORD in .env
+  timeout: 30
+
+# Nomi dei database sulla stessa istanza (vedi CLAUDE.md, sezione Topologia)
+database:
+  mago: "KODICEBAGNO_4"     # sorgente Mago 4
+  trasporti: "trasporti"    # fatture vettori (fase successiva)
+  dwh: "CDG_QV"             # destinazione: il nostro datawarehouse
+
+# Periodo di competenza da elaborare. Mai hardcodare le date nel codice: stanno qui.
+periodo:
+  anno: 2025
+  mese: 1

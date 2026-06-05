@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CDG_QV · Dashboard estrazioni</title>
+<style>
+  :root{
+    --paper:#f6f4ee; --ink:#211e1a; --muted:#6f675c; --line:#e2dcd0; --card:#fffdf8;
+    --ok:#2f7d52; --okbg:#e7f1ea; --warn:#9a5a1e; --warnbg:#f6ecdd;
+    --l1:#3a6ea5; --l2:#7a5ea7; --l3:#a55b3a; --struct:#8a8170;
+    --accent:#3a6ea5;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.5}
+  code,pre{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+  header{padding:22px 28px;border-bottom:1px solid var(--line);background:var(--card)}
+  header h1{font-family:Georgia,"Iowan Old Style",serif;font-size:24px;margin:0;letter-spacing:.2px}
+  header p{margin:4px 0 0;color:var(--muted);font-size:14px}
+  .wrap{display:grid;grid-template-columns:240px 1fr;gap:0;max-width:1180px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:start;padding:22px 14px;border-right:1px solid var(--line);height:100vh;overflow:auto}
+  nav .t{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 10px 6px}
+  nav a{display:flex;align-items:center;gap:8px;color:var(--ink);text-decoration:none;font-size:13.5px;
+        padding:7px 6px;border-radius:7px}
+  nav a:hover{background:#efeae0}
+  nav .dot{width:7px;height:7px;border-radius:50%;flex:none}
+  nav .dot.on{background:var(--ok)} nav .dot.off{background:#cfc7b8}
+  nav .nv-liv{font-family:Georgia,serif;font-size:11px;width:22px;text-align:center;color:#fff;border-radius:4px;flex:none;padding:1px 0}
+  main{padding:24px 28px 60px}
+  .banner{padding:12px 16px;border-radius:10px;font-size:14px;margin-bottom:22px}
+  .banner.ok{background:var(--okbg);color:var(--ok)}
+  .banner.warn{background:var(--warnbg);color:var(--warn)}
+  .banner ul{margin:8px 0 0;padding-left:18px}
+  .liv1{--lc:var(--l1)} .liv2{--lc:var(--l2)} .liv3{--lc:var(--l3)} .liv0{--lc:var(--struct)}
+  .nv-liv.liv1{background:var(--l1)} .nv-liv.liv2{background:var(--l2)} .nv-liv.liv3{background:var(--l3)} .nv-liv.liv0{background:var(--struct)}
+  .card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--lc,var(--struct));
+        border-radius:12px;padding:18px 20px;margin-bottom:18px}
+  @media (prefers-reduced-motion: no-preference){
+    .card{opacity:0;transform:translateY(8px);animation:rise .5s ease forwards}
+    .card:nth-child(1){animation-delay:.02s}.card:nth-child(2){animation-delay:.06s}
+    .card:nth-child(3){animation-delay:.10s}.card:nth-child(4){animation-delay:.14s}.card:nth-child(5){animation-delay:.18s}
+  }
+  @keyframes rise{to{opacity:1;transform:none}}
+  @supports not (display:grid){
+    .wrap{display:block} nav{height:auto;border-right:none;border-bottom:1px solid var(--line)}
+  }
+  .card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}
+  .card-head h3{font-family:Georgia,serif;font-size:18px;margin:0}
+  .pills{display:flex;gap:6px;flex-wrap:wrap}
+  .pill{font-size:11.5px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);background:#fff;color:var(--muted)}
+  .pill.liv{color:#fff;border:none;background:var(--lc,var(--struct))}
+  .pill.on{color:var(--ok);background:var(--okbg);border-color:transparent}
+  .pill.off{color:var(--muted)}
+  .pill.code{font-family:ui-monospace,monospace;color:var(--ink)}
+  .spieg{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:14px}
+  .spieg .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--accent);font-weight:600}
+  .spieg p{margin:5px 0 0;font-size:14px}
+  details.codice{margin-top:14px;border-top:1px dashed var(--line);padding-top:10px}
+  details.codice summary{cursor:pointer;font-size:12.5px;color:var(--muted)}
+  details.codice code{color:var(--ink)}
+  details.codice pre{background:#1f1d1a;color:#e9e4d8;padding:14px;border-radius:8px;overflow:auto;font-size:12.5px;margin:10px 0 0;max-height:360px}
+  @media(max-width:820px){.wrap{grid-template-columns:1fr}nav{display:none}.spieg{grid-template-columns:1fr}}
+
+  /* Pannello caso di test */
+  .test{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:26px}
+  .test h2{font-family:Georgia,serif;font-size:19px;margin:0 0 4px}
+  .test .nota{font-size:13px;color:var(--muted);margin:0 0 14px}
+  .test .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  .test table{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px}
+  .test th,.test td{border-bottom:1px solid var(--line);padding:5px 7px;text-align:left}
+  .test th{color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em}
+  .test input{width:90px;border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:inherit}
+  .test td.num,.test th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .btn{margin-top:12px;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:9px 16px;font:inherit;cursor:pointer}
+  .btn.sec{background:#fff;color:var(--ink);border:1px solid var(--line);margin-left:8px}
+  .ris{margin-top:18px}
+  .ris h3{font-family:Georgia,serif;font-size:16px;margin:0 0 6px}
+  .tot{font-size:14px;margin-top:8px}
+  .tag{display:inline-block;font-size:11px;background:#efeae0;color:var(--muted);padding:2px 8px;border-radius:999px;margin-left:8px}
+  @media(max-width:820px){.test .grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>CDG_QV · Dashboard delle estrazioni</h1>
+  <p>Ogni componente di costo, spiegato accanto al codice che lo calcola. Per chi non legge SQL, e per provare un caso di test.</p>
+</header>
+<div class="wrap">
+  <nav>
+    <p class="t">Componenti</p>
+    <a href="#test"><span class="dot on"></span><span class="nv-liv liv0">▶</span>Caso di test</a>
+    <a href="#comp-COSTO_VENDUTO"><span class="dot on"></span><span class="nv-liv liv1">I</span>Costo del venduto</a><a href="#comp-PROVVIGIONI"><span class="dot off"></span><span class="nv-liv liv2">II</span>Provvigioni marketplace</a><a href="#comp-IMBALLI"><span class="dot off"></span><span class="nv-liv liv2">II</span>Costi di imballaggio</a><a href="#comp-TRASPORTO"><span class="dot off"></span><span class="nv-liv liv3">III</span>Trasporto / spedizione</a><a href="#comp-PUBBLICITA"><span class="dot off"></span><span class="nv-liv liv3">III</span>Pubblicità / advertising</a>
+  </nav>
+  <main>
+    <div class="banner ok">Spiegazioni allineate al codice: manifest, registro e procedure SQL coincidono.</div>
+
+    <section class="test" id="test">
+      <h2>Caso di test</h2>
+      <p class="nota">Inserisci un documento di esempio (righe + costi certificati) e premi <em>Esegui</em>.
+        È una <strong>simulazione della logica dichiarata</strong> nel manifest: il calcolo ufficiale
+        gira sul database con le procedure reali (<code>python src/esegui_caso_test.py</code>).
+        Il <strong>costo</strong> arriva dal motore kodice (gia' con risalita mese e kit risolti);
+        il <strong>ricavo</strong> di riga include gia' la quota di trasporto recuperato spalmata.</p>
+      <div class="grid">
+        <div>
+          <strong>Righe di vendita</strong>
+          <table id="t-righe"><thead><tr><th>Riga</th><th>Articolo</th><th class="num">Q.tà</th><th class="num">Ricavo</th><th></th></tr></thead><tbody></tbody></table>
+          <button class="btn sec" onclick="aggiungiRiga()">+ riga</button>
+        </div>
+        <div>
+          <strong>Costi certificati (kodice)</strong>
+          <table id="t-costi"><thead><tr><th>Articolo</th><th class="num">Anno</th><th class="num">Mese</th><th class="num">Costo</th><th></th></tr></thead><tbody></tbody></table>
+          <button class="btn sec" onclick="aggiungiCosto()">+ costo</button>
+          <p class="nota" style="margin-top:10px">Competenza: <input id="c-anno" style="width:70px"> / <input id="c-mese" style="width:50px"></p>
+        </div>
+      </div>
+      <button class="btn" onclick="esegui()">Esegui simulazione</button>
+      <div class="ris" id="risultati"></div>
+    </section>
+
+    
+    <section class="card liv1" id="comp-COSTO_VENDUTO">
+      <div class="card-head">
+        <h3>Costo del venduto</h3>
+        <div class="pills"><span class="pill liv liv1">Margine I</span><span class="pill on">Attivo</span><span class="pill segno">costo (−)</span><span class="pill code">COSTO_VENDUTO</span></div>
+      </div>
+      <div class="spieg">
+        <div><span class="lbl">Da dove prende i dati</span><p>Righe di vendita (src.righe_vendita) e il costo articolo/mese GIA&#x27; CERTIFICATO dal motore kodice (kodice.costi_articolo_mese), alimentato a sua volta da Mago (MA_ItemsWAP per il costo medio ponderato, MA_BillOfMaterialsComp per i kit).</p></div>
+        <div><span class="lbl">Con che logica</span><p>Per ogni riga di vendita: importo = quantita venduta × costo certificato dell&#x27;articolo per il mese di competenza, letto da kodice.costi_articolo_mese. La risalita al mese con costo disponibile e l&#x27;esplosione dei kit (distinta) sono GIA&#x27; risolte dal motore (core.usp_prepara_costi). Gli articoli senza costo certificato non producono costo (sono ricavo senza costo) e, se anomali, sono tracciati in kodice.costi_eccezioni.</p></div>
+      </div>
+      <details class="codice">
+        <summary>Codice realmente eseguito · <code>sql/components/20_comp_costo_venduto.sql</code></summary>
+        <pre><code>-- =============================================================================
+-- 20_comp_costo_venduto.sql  (eseguire su CDG_QV)
+-- -----------------------------------------------------------------------------
+-- COMPONENTE: COSTO_VENDUTO (livello 1).
+-- Scrive SOLO le righe con codice_componente = &#x27;COSTO_VENDUTO&#x27; in core.componente_riga.
+-- importo = quantita * costo articolo/mese.
+--
+-- FONTE DEL COSTO: kodice.costi_articolo_mese (Item, Anno, Mese, Costo), l&#x27;OUTPUT
+-- CERTIFICATO del motore core.usp_prepara_costi gia&#x27; presente in CDG_QV:
+--   * risalita mese ed esplosione kit (distinta) sono GIA&#x27; risolte la&#x27; dentro;
+--   * contiene solo costi validi/completi (Completo = 1);
+--   * i costi mancanti/non validi NON arrivano qui: sono tracciati, con stato,
+--     in kodice.costi_eccezioni.
+-- NB: usiamo l&#x27;output certificato, NON kodice.vw_costo_sorgente (che e&#x27; l&#x27;input
+--     grezzo da MA_ItemsWAP, prima di risalita/kit/bonifica).
+-- PREREQUISITO: il periodo deve essere stato preparato dal motore, es.
+--     EXEC core.usp_prepara_costi @schema_azienda = &#x27;kodice&#x27;, @anno = ..., @mese = ...;
+--
+-- CONTRATTO comune a tutte le procedure di componente:
+--   1) DELETE delle proprie righe del periodo;
+--   2) INSERT delle proprie righe, valorizzando &#x27;origine&#x27;.
+-- Cosi&#x27; correggere questo componente NON tocca gli altri.
+-- =============================================================================
+CREATE OR ALTER PROCEDURE dbo.usp_comp_COSTO_VENDUTO
+    @anno INT, @mese INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM core.componente_riga
+    WHERE anno = @anno AND mese = @mese AND codice_componente = N&#x27;COSTO_VENDUTO&#x27;;
+
+    -- JOIN (non LEFT): le righe il cui articolo non ha un costo certificato per il
+    -- mese NON producono riga di costo. Sono visibili come ricavo senza costo e,
+    -- se anomale, gia&#x27; censite in kodice.costi_eccezioni.
+    INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
+    SELECT
+        r.anno, r.mese, r.sale_doc_id, r.line,
+        N&#x27;COSTO_VENDUTO&#x27;,
+        CAST(r.quantita * k.Costo AS DECIMAL(18,2))                       AS importo,
+        CONCAT(N&#x27;kodice.costi_articolo_mese [&#x27;, k.TipoArticolo, N&#x27;]&#x27;)      AS origine
+    FROM src.righe_vendita AS r
+    JOIN kodice.costi_articolo_mese AS k
+         ON LTRIM(RTRIM(k.Item)) = r.codice_articolo   -- TRIM anche lato kodice: robusto agli spazi
+        AND k.Anno = r.anno
+        AND k.Mese = r.mese
+    WHERE r.anno = @anno AND r.mese = @mese;
+END
+GO
+</code></pre>
+      </details>
+    </section>
+    <section class="card liv2" id="comp-PROVVIGIONI">
+      <div class="card-head">
+        <h3>Provvigioni marketplace</h3>
+        <div class="pills"><span class="pill liv liv2">Margine II</span><span class="pill off">Inattivo</span><span class="pill segno">costo (−)</span><span class="pill code">PROVVIGIONI</span></div>
+      </div>
+      <div class="spieg">
+        <div><span class="lbl">Da dove prende i dati</span><p>Da definire: tipicamente le fee del marketplace per categoria/canale.</p></div>
+        <div><span class="lbl">Con che logica</span><p>Da definire: provvigione attribuita alla riga in base alla categoria o al canale di vendita. Nel codice e&#x27; ancora uno stub da adattare alla sorgente reale.</p></div>
+      </div>
+      <details class="codice">
+        <summary>Codice realmente eseguito · <code>sql/components/21_comp_provvigioni.sql</code></summary>
+        <pre><code>-- =============================================================================
+-- 21_comp_provvigioni.sql  (eseguire su CDG_QV)
+-- -----------------------------------------------------------------------------
+-- COMPONENTE: PROVVIGIONI (livello 2) — provvigioni/fee del marketplace.
+-- STUB: stessa struttura del costo del venduto, ma la SELECT sorgente e&#x27; tutta
+-- da adattare (-- ADATTA). Quando e&#x27; pronta, in cfg.componenti metti attivo = 1.
+-- =============================================================================
+CREATE OR ALTER PROCEDURE dbo.usp_comp_PROVVIGIONI
+    @anno INT, @mese INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM core.componente_riga
+    WHERE anno = @anno AND mese = @mese AND codice_componente = N&#x27;PROVVIGIONI&#x27;;
+
+    INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
+    SELECT
+        r.anno, r.mese, r.sale_doc_id, r.line,
+        N&#x27;PROVVIGIONI&#x27;,
+        -- ADATTA: la fee marketplace, tipicamente per categoria/canale.
+        CAST(NULL AS DECIMAL(18,2)) AS importo,
+        N&#x27;-- ADATTA: sorgente provvigioni&#x27; AS origine
+    FROM src.righe_vendita AS r
+    WHERE r.anno = @anno AND r.mese = @mese;
+END
+GO
+</code></pre>
+      </details>
+    </section>
+    <section class="card liv2" id="comp-IMBALLI">
+      <div class="card-head">
+        <h3>Costi di imballaggio</h3>
+        <div class="pills"><span class="pill liv liv2">Margine II</span><span class="pill off">Inattivo</span><span class="pill segno">costo (−)</span><span class="pill code">IMBALLI</span></div>
+      </div>
+      <div class="spieg">
+        <div><span class="lbl">Da dove prende i dati</span><p>Da definire: tariffa di imballo per articolo/categoria.</p></div>
+        <div><span class="lbl">Con che logica</span><p>Da definire: di norma quantita × costo imballo unitario. Nel codice e&#x27; uno stub.</p></div>
+      </div>
+      <details class="codice">
+        <summary>Codice realmente eseguito · <code>sql/components/22_comp_imballi.sql</code></summary>
+        <pre><code>-- =============================================================================
+-- 22_comp_imballi.sql  (eseguire su CDG_QV)
+-- -----------------------------------------------------------------------------
+-- COMPONENTE: IMBALLI (livello 2) — costi di imballaggio, tipicamente per unita.
+-- STUB da adattare. Quando e&#x27; pronta, in cfg.componenti metti attivo = 1.
+-- =============================================================================
+CREATE OR ALTER PROCEDURE dbo.usp_comp_IMBALLI
+    @anno INT, @mese INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM core.componente_riga
+    WHERE anno = @anno AND mese = @mese AND codice_componente = N&#x27;IMBALLI&#x27;;
+
+    INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
+    SELECT
+        r.anno, r.mese, r.sale_doc_id, r.line,
+        N&#x27;IMBALLI&#x27;,
+        -- ADATTA: costo imballo (es. quantita * tariffa imballo per articolo/categoria).
+        CAST(NULL AS DECIMAL(18,2)) AS importo,
+        N&#x27;-- ADATTA: sorgente imballi&#x27; AS origine
+    FROM src.righe_vendita AS r
+    WHERE r.anno = @anno AND r.mese = @mese;
+END
+GO
+</code></pre>
+      </details>
+    </section>
+    <section class="card liv3" id="comp-TRASPORTO">
+      <div class="card-head">
+        <h3>Trasporto / spedizione</h3>
+        <div class="pills"><span class="pill liv liv3">Margine III</span><span class="pill off">Inattivo</span><span class="pill segno">costo (−)</span><span class="pill code">TRASPORTO</span></div>
+      </div>
+      <div class="spieg">
+        <div><span class="lbl">Da dove prende i dati</span><p>Da definire: costo vettore dal database &#x27;trasporti&#x27; (KB_FattureVettori).</p></div>
+        <div><span class="lbl">Con che logica</span><p>Da definire: il costo di spedizione del documento viene allocato alle righe con un DRIVER reale (es. peso o volume della riga sul totale), non spalmato a fatturato. Nel codice e&#x27; uno stub che mostra il pattern di allocazione.</p></div>
+      </div>
+      <details class="codice">
+        <summary>Codice realmente eseguito · <code>sql/components/23_comp_trasporto.sql</code></summary>
+        <pre><code>-- =============================================================================
+-- 23_comp_trasporto.sql  (eseguire su CDG_QV)
+-- -----------------------------------------------------------------------------
+-- COMPONENTE: TRASPORTO (livello 3) — spedizione, allocata per DRIVER (peso/volume),
+-- non spalmata a fatturato. Sorgente: DB &#x27;trasporti&#x27; (fatture vettori).
+-- STUB: mostra il pattern dell&#x27;allocazione per driver, da completare (-- ADATTA).
+-- =============================================================================
+CREATE OR ALTER PROCEDURE dbo.usp_comp_TRASPORTO
+    @anno INT, @mese INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM core.componente_riga
+    WHERE anno = @anno AND mese = @mese AND codice_componente = N&#x27;TRASPORTO&#x27;;
+
+    -- Pattern di allocazione per driver (esempio: peso di riga / peso totale documento):
+    --   costo_trasporto_riga = costo_trasporto_documento * (peso_riga / peso_doc)
+    -- I pesi e il costo vettore vanno presi dalle sorgenti reali (-- ADATTA).
+    INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
+    SELECT
+        r.anno, r.mese, r.sale_doc_id, r.line,
+        N&#x27;TRASPORTO&#x27;,
+        -- ADATTA: costo vettore del documento * quota driver della riga.
+        CAST(NULL AS DECIMAL(18,2)) AS importo,
+        N&#x27;-- ADATTA: trasporti.dbo.KB_FattureVettori, allocato per driver&#x27; AS origine
+    FROM src.righe_vendita AS r
+    WHERE r.anno = @anno AND r.mese = @mese;
+END
+GO
+</code></pre>
+      </details>
+    </section>
+    <section class="card liv3" id="comp-PUBBLICITA">
+      <div class="card-head">
+        <h3>Pubblicità / advertising</h3>
+        <div class="pills"><span class="pill liv liv3">Margine III</span><span class="pill off">Inattivo</span><span class="pill segno">costo (−)</span><span class="pill code">PUBBLICITA</span></div>
+      </div>
+      <div class="spieg">
+        <div><span class="lbl">Da dove prende i dati</span><p>Da definire: spesa pubblicitaria (es. per campagna/canale).</p></div>
+        <div><span class="lbl">Con che logica</span><p>Da definire: la spesa pubblicitaria del periodo viene allocata alle righe con un DRIVER reale (es. fatturato di canale, numero ordini), non spalmata indistintamente. Nel codice e&#x27; uno stub da adattare.</p></div>
+      </div>
+      <details class="codice">
+        <summary>Codice realmente eseguito · <code>sql/components/24_comp_pubblicita.sql</code></summary>
+        <pre><code>-- =============================================================================
+-- 24_comp_pubblicita.sql  (eseguire su CDG_QV)
+-- -----------------------------------------------------------------------------
+-- COMPONENTE: PUBBLICITA (livello 3) — costi pubblicitari, allocati per DRIVER.
+-- STUB da adattare. Quando e&#x27; pronta, in cfg.componenti metti attivo = 1.
+-- =============================================================================
+CREATE OR ALTER PROCEDURE dbo.usp_comp_PUBBLICITA
+    @anno INT, @mese INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM core.componente_riga
+    WHERE anno = @anno AND mese = @mese AND codice_componente = N&#x27;PUBBLICITA&#x27;;
+
+    INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
+    SELECT
+        r.anno, r.mese, r.sale_doc_id, r.line,
+        N&#x27;PUBBLICITA&#x27;,
+        -- ADATTA: spesa pubblicitaria allocata alla riga con un driver reale.
+        CAST(NULL AS DECIMAL(18,2)) AS importo,
+        N&#x27;-- ADATTA: sorgente pubblicita, allocata per driver&#x27; AS origine
+    FROM src.righe_vendita AS r
+    WHERE r.anno = @anno AND r.mese = @mese;
+END
+GO
+</code></pre>
+      </details>
+    </section>
+  </main>
+</div>
+
+<script>
+const DATI = {"componenti": [{"codice": "COSTO_VENDUTO", "titolo": "Costo del venduto", "livello": 1, "segno": -1, "attivo": true, "simulazione": {"tipo": "costo_certificato"}}, {"codice": "PROVVIGIONI", "titolo": "Provvigioni marketplace", "livello": 2, "segno": -1, "attivo": false, "simulazione": {"tipo": "percentuale_ricavo", "parametro": 0.12, "nota": "Formula DIMOSTRATIVA (12% del ricavo), solo per provare il pannello. Da sostituire."}}, {"codice": "IMBALLI", "titolo": "Costi di imballaggio", "livello": 2, "segno": -1, "attivo": false, "simulazione": {"tipo": "per_unita", "parametro": 0.5, "nota": "Formula DIMOSTRATIVA (0,50 € a unita). Da sostituire."}}, {"codice": "TRASPORTO", "titolo": "Trasporto / spedizione", "livello": 3, "segno": -1, "attivo": false, "simulazione": {"tipo": "per_unita", "parametro": 3.0, "nota": "Formula DIMOSTRATIVA (3 € a unita). Da sostituire con l'allocazione per driver."}}, {"codice": "PUBBLICITA", "titolo": "Pubblicità / advertising", "livello": 3, "segno": -1, "attivo": false, "simulazione": {"tipo": "nessuna", "nota": "Logica non ancora definita: non simulabile finche' non e' specificata."}}], "caso": {"_descrizione": "Documento di esempio su cui provare l'estrazione. Modificalo a piacere: righe di vendita + costi certificati (kodice.costi_articolo_mese). La dashboard lo usa come caso di test. ART-C non ha costo certificato: dimostra il caso 'ricavo senza costo' (anomalia da kodice.costi_eccezioni).", "competenza": {"anno": 2026, "mese": 4}, "righe_vendita": [{"line": 1, "codice_articolo": "ART-A", "tipo_articolo": "MERCE", "quantita": 10, "ricavo_netto": 1000.0}, {"line": 2, "codice_articolo": "ART-B", "tipo_articolo": "MERCE", "quantita": 5, "ricavo_netto": 750.0}, {"line": 3, "codice_articolo": "ART-C", "tipo_articolo": "MERCE", "quantita": 4, "ricavo_netto": 400.0}], "costi_articolo": [{"codice_articolo": "ART-A", "anno": 2026, "mese": 4, "costo": 42.0}, {"codice_articolo": "ART-B", "anno": 2026, "mese": 4, "costo": 90.0}]}, "risultati": null};
+const ROMANO = {1:"I",2:"II",3:"III"};
+
+function eur(x){ return (x==null)?"—":x.toLocaleString("it-IT",{minimumFractionDigits:2,maximumFractionDigits:2})+" €"; }
+
+// --- popola le tabelle editabili dal caso di test ---------------------------
+function righeTbody(){ return document.querySelector("#t-righe tbody"); }
+function costiTbody(){ return document.querySelector("#t-costi tbody"); }
+function aggiungiRiga(r={line:"",codice_articolo:"",quantita:"",ricavo_netto:""}){
+  const tr=document.createElement("tr");
+  tr.innerHTML=`<td><input value="${r.line}" style="width:50px"></td><td><input value="${r.codice_articolo}"></td>
+    <td class="num"><input class="num" value="${r.quantita}"></td><td class="num"><input class="num" value="${r.ricavo_netto}"></td>
+    <td><button class="btn sec" onclick="this.closest('tr').remove()">×</button></td>`;
+  righeTbody().appendChild(tr);
+}
+function aggiungiCosto(k={codice_articolo:"",anno:"",mese:"",costo:""}){
+  const tr=document.createElement("tr");
+  tr.innerHTML=`<td><input value="${k.codice_articolo}"></td><td class="num"><input class="num" value="${k.anno}" style="width:70px"></td>
+    <td class="num"><input class="num" value="${k.mese}" style="width:50px"></td><td class="num"><input class="num" value="${k.costo}"></td>
+    <td><button class="btn sec" onclick="this.closest('tr').remove()">×</button></td>`;
+  costiTbody().appendChild(tr);
+}
+(function init(){
+  const c=DATI.caso||{competenza:{anno:2026,mese:4},righe_vendita:[],costi_articolo:[]};
+  document.getElementById("c-anno").value=c.competenza.anno;
+  document.getElementById("c-mese").value=c.competenza.mese;
+  (c.righe_vendita||[]).forEach(aggiungiRiga);
+  (c.costi_articolo||[]).forEach(aggiungiCosto);
+})();
+
+function leggiRighe(){
+  return [...righeTbody().querySelectorAll("tr")].map(tr=>{
+    const i=tr.querySelectorAll("input");
+    return {line:i[0].value, codice_articolo:i[1].value.trim(),
+            quantita:parseFloat(i[2].value)||0, ricavo_netto:parseFloat(i[3].value)||0};
+  }).filter(r=>r.codice_articolo);
+}
+function leggiCosti(){
+  return [...costiTbody().querySelectorAll("tr")].map(tr=>{
+    const i=tr.querySelectorAll("input");
+    return {codice_articolo:i[0].value.trim(), anno:parseInt(i[1].value)||0,
+            mese:parseInt(i[2].value)||0, costo:parseFloat(i[3].value)};
+  }).filter(k=>k.codice_articolo);
+}
+
+// --- simulazione della logica dichiarata ------------------------------------
+// Costo CERTIFICATO: il motore kodice ha gia' risolto risalita mese e kit, quindi
+// si cerca il costo dell'articolo per il mese di competenza ESATTO (nessuna risalita qui).
+function costoCertificato(art, costi, competenza){
+  const c=costi.find(k=>k.codice_articolo===art && (k.anno*100+k.mese)===competenza);
+  return c? c.costo : null;
+}
+function importoComponente(comp, riga, costi, competenza){
+  const s=comp.simulazione||{tipo:"nessuna"};
+  if(s.tipo==="costo_certificato"){ const k=costoCertificato(riga.codice_articolo,costi,competenza); return k==null?null:+(riga.quantita*k).toFixed(2); }
+  if(s.tipo==="percentuale_ricavo"){ return +(riga.ricavo_netto*(s.parametro||0)).toFixed(2); }
+  if(s.tipo==="per_unita"){ return +(riga.quantita*(s.parametro||0)).toFixed(2); }
+  return undefined; // logica non definita -> non simulabile
+}
+
+function esegui(){
+  const righe=leggiRighe(), costi=leggiCosti();
+  const competenza=(parseInt(document.getElementById("c-anno").value)||0)*100+(parseInt(document.getElementById("c-mese").value)||0);
+  const comps=DATI.componenti.filter(c=>c.attivo);
+
+  // controllo per componente + dettaglio per riga
+  const perRiga={}; righe.forEach(r=>perRiga[r.line]={ricavo:r.ricavo_netto,liv:{1:0,2:0,3:0}});
+  const controllo=[];
+  comps.forEach(c=>{
+    let n=0,nz=0,tot=0,simulabile=true;
+    righe.forEach(r=>{
+      const imp=importoComponente(c,r,costi,competenza);
+      if(imp===undefined){simulabile=false;return;}
+      n++; if(imp==null)nz++; tot+=(imp||0);
+      if(c.livello) perRiga[r.line].liv[c.livello]+=(imp||0)*c.segno;
+    });
+    controllo.push({codice:c.codice,titolo:c.titolo,livello:c.livello,simulabile,n,nz,tot});
+  });
+
+  // margini per riga
+  const fatto=righe.map(r=>{
+    const L=perRiga[r.line].liv;
+    const mdc1=r.ricavo_netto+L[1], mdc2=mdc1+L[2], mdc3=mdc2+L[3];
+    return {line:r.line,art:r.codice_articolo,ricavo:r.ricavo_netto,mdc1,mdc2,mdc3};
+  });
+  const T=(k)=>fatto.reduce((s,f)=>s+f[k],0);
+
+  let h=`<h3>Controllo per componente <span class="tag">simulazione</span></h3>
+    <table><thead><tr><th>Componente</th><th>Liv.</th><th class="num">Righe</th><th class="num">Senza importo</th><th class="num">Totale</th></tr></thead><tbody>`;
+  controllo.forEach(c=>{
+    h+=`<tr><td>${c.titolo}</td><td>${ROMANO[c.livello]||"—"}</td>
+      <td class="num">${c.simulabile?c.n:"—"}</td><td class="num">${c.simulabile?c.nz:"logica non definita"}</td>
+      <td class="num">${c.simulabile?eur(c.tot):"—"}</td></tr>`;
+  });
+  h+=`</tbody></table>
+    <h3 style="margin-top:18px">Conto economico di riga</h3>
+    <table><thead><tr><th>Riga</th><th>Articolo</th><th class="num">Ricavo</th><th class="num">MdC I</th><th class="num">MdC II</th><th class="num">MdC III</th></tr></thead><tbody>`;
+  fatto.forEach(f=>{
+    h+=`<tr><td>${f.line}</td><td>${f.art}</td><td class="num">${eur(f.ricavo)}</td>
+      <td class="num">${eur(f.mdc1)}</td><td class="num">${eur(f.mdc2)}</td><td class="num">${eur(f.mdc3)}</td></tr>`;
+  });
+  h+=`</tbody></table>
+    <p class="tot"><strong>Totali</strong> — MdC I: ${eur(T("mdc1"))} · MdC II: ${eur(T("mdc2"))} · MdC III: ${eur(T("mdc3"))}</p>`;
+
+  if(DATI.risultati){
+    h+=`<h3 style="margin-top:22px">Risultati ufficiali dal database <span class="tag">procedure reali</span></h3>
+      <pre style="background:#1f1d1a;color:#e9e4d8;padding:12px;border-radius:8px;overflow:auto;font-size:12px">`
+      +JSON.stringify(DATI.risultati,null,2)+`</pre>`;
+  }
+  document.getElementById("risultati").innerHTML=h;
+}
+esegui();
+</script>
+</body>
+</html>
