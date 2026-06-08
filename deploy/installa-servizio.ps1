@@ -7,9 +7,12 @@ $python  = "C:\Users\mago.admin\AppData\Local\Programs\Python\Python313\python.e
 $appDir  = "C:\ApplicazioniLP\KODICEBAGNO\SORGENTI\KB_ControlloDiGestioneQV\cdg-qv"
 $task    = "CDG_QV Dashboard"
 
+# NB: gira come l'utente che POSSIEDE Python (mago.admin), non SYSTEM, altrimenti non vede
+# Python in C:\Users\mago.admin\AppData. S4U = "esegui anche se l'utente non e' connesso", senza password.
+$utente  = "$env:USERDOMAIN\$env:USERNAME"   # esegui lo script come admin: di solito VM2MAGO\mago.admin
 $action  = New-ScheduledTaskAction -Execute $python -Argument "src\dashboard_app.py" -WorkingDirectory $appDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
-$princ   = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+$princ   = New-ScheduledTaskPrincipal -UserId $utente -LogonType S4U -RunLevel Highest
 $set     = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 
 # CDG_HOST=127.0.0.1 e' il default nel codice: il servizio resta locale, IIS fa il proxy.
