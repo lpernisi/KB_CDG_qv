@@ -66,14 +66,24 @@ def convert(src: Path, out: Path):
 
     style_names = {s.name for s in doc.styles}
     para = []           # righe del paragrafo in costruzione
-    state = {'list_p': None}   # paragrafo dell'ultimo punto elenco (per le continuazioni)
+    state = {'list_p': None, 'quote': False}   # ultimo punto elenco (continuazioni) / paragrafo citazione
 
     def flush_para():
         if not para:
             return
         text = ' '.join(x.strip() for x in para).strip()
         para.clear()
+        quote = state['quote']
+        state['quote'] = False
         if not text:
+            return
+        # citazione/nota: tutto il paragrafo in corsivo, leggermente rientrato
+        if quote:
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Inches(0.25)
+            add_runs(p, text)
+            for r in p.runs:
+                r.italic = True
             return
         # sottotitolo: riga interamente in *corsivo* (singoli asterischi)
         if (text.startswith('*') and not text.startswith('**')
@@ -99,12 +109,23 @@ def convert(src: Path, out: Path):
                 doc.add_heading(s[len(pref):].strip(), level=lvl_h)
                 break
         else:
-            m = re.match(r'^(\s*)-\s+(.*)$', line)
-            if m:
+            mb = re.match(r'^(\s*)-\s+(.*)$', line)
+            mo = re.match(r'^(\s*)\d+\.\s+(.*)$', line)
+            if s.startswith('>'):
                 flush_para()
-                sn = 'List Bullet' if len(m.group(1)) < 2 else 'List Bullet 2'
+                state['quote'] = True
+                para.append(s.lstrip('>').strip())
+            elif mb:
+                flush_para()
+                sn = 'List Bullet' if len(mb.group(1)) < 2 else 'List Bullet 2'
                 p = doc.add_paragraph(style=sn if sn in style_names else None)
-                add_runs(p, m.group(2))
+                add_runs(p, mb.group(2))
+                state['list_p'] = p
+            elif mo:
+                flush_para()
+                sn = 'List Number' if len(mo.group(1)) < 2 else 'List Number 2'
+                p = doc.add_paragraph(style=sn if sn in style_names else None)
+                add_runs(p, mo.group(2))
                 state['list_p'] = p
             elif state['list_p'] is not None and not para:
                 add_runs(state['list_p'], ' ' + s)   # continuazione del punto elenco

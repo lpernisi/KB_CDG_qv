@@ -911,6 +911,7 @@ PAGINA = r"""<!DOCTYPE html>
     <section id="sec-materiali" class="sez-main" style="display:none">
       <h2 class="grp">Costo dei materiali · nostro costo (fonte principale)</h2>
       <p class="muted" style="margin-top:-4px">Basato sul ricalcolo parallelo mensile (<code>kodice.wap_ricalc</code> / <code>vw_costo_eff</code>). MA_ItemsWAP non è più la fonte: resta solo come <strong>raffronto</strong> (sezione dedicata a sinistra).</p>
+      <p style="margin:2px 0 8px"><a href="#" onclick="rilanciaRic();return false" style="display:inline-block;padding:5px 12px;background:#2f5d8a;color:#fff;border-radius:5px;text-decoration:none;font-weight:600">↻ Ricalcola i costi dell'anno in corso</a> <span class="muted">applica le bonifiche e ricostruisce il WAP mese per mese (pochi secondi); poi rivedi e consolida i mesi.</span></p>
       <div id="mesebanner"></div>
       <div class="subtabs">
         <div class="subtab on" data-sv="qual" onclick="sottoVista('qual')">Certificazione qualità</div>
@@ -1360,7 +1361,7 @@ async function rilanciaRic(){
   if(!confirm('Rilancio il ricalcolo 2026 con le aperture certificate? (qualche secondo)')) return;
   await fetch('/api/rilancia_ricalcolo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({anno:2026})});
   alert('Ricalcolo 2026 completato: i costi sono aggiornati con le aperture bonificate.');
-  caricaBonifica();
+  aggiornaStatoMese(); sottoVista(SUBV||'qual');
 }
 let acdeb;
 function cercaArtDeb(){ clearTimeout(acdeb); acdeb=setTimeout(cercaArt,250); }
