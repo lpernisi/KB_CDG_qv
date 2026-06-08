@@ -573,11 +573,25 @@ def api_costo_dettaglio():
                QtaVend, QtaResi, QtaRettTrasf, QtaFin, PuroUnit, OneriUnit, WAPCost_ricalc, WAPCost_Mago
         FROM kodice.wap_ricalc WHERE Item=:i AND Anno=:a ORDER BY Mese""", i=item, a=anno)
     eff = righe("SELECT Fonte, CostoEff, PuroUnit, OneriUnit, ValuationType FROM kodice.vw_costo_eff WHERE Item=:i", i=item)
+    # Fornitore preferenziale: SOLO anagrafica di tipo FORNITORE (in MA_CustSupp ci sono anche i clienti;
+    # alcuni codici, es. 9998, esistono con entrambi i tipi). CustSuppType 3211265 = fornitore, 3211264 = cliente.
     forn = righe("""
         SELECT TOP 1 LTRIM(RTRIM(g.Supplier)) AS Supplier, cs.CompanyName
         FROM KODICEBAGNO_4.dbo.MA_ItemsGoodsData g
-        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = g.Supplier
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = g.Supplier AND cs.CustSuppType = 3211265
         WHERE LTRIM(RTRIM(g.Item)) = :i AND g.Supplier IS NOT NULL AND g.Supplier <> ''""", i=item)
+    # Distinta esplosa: se l'articolo e' un KIT non ha WAP/movimenti propri, il costo nasce dai componenti.
+    # Mostro i componenti diretti col loro costo certificato piu' recente dell'anno (costi_articolo_mese).
+    kit = righe("""
+        SELECT LTRIM(RTRIM(b.Component)) AS Item, i.Description AS descr, b.Qty,
+               cm.Costo AS costo, cm.Mese AS mese_costo
+        FROM KODICEBAGNO_4.dbo.MA_BillOfMaterialsComp b
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_Items i ON LTRIM(RTRIM(i.Item)) = LTRIM(RTRIM(b.Component))
+        OUTER APPLY (SELECT TOP 1 Costo, Mese FROM kodice.costi_articolo_mese
+                     WHERE LTRIM(RTRIM(Item)) = LTRIM(RTRIM(b.Component)) AND Anno = :a
+                     ORDER BY Mese DESC) cm
+        WHERE LTRIM(RTRIM(b.BOM)) = :i
+        ORDER BY b.Component""", i=item, a=anno)
     mov = righe("""
         SELECT MONTH(h.PostingDate) AS Mese, h.InvRsn, h.WAPMovementType, h.Currency, h.Fixing,
                SUM(d.Qty) AS qty, SUM(d.LineAmount) AS lineamt,
@@ -588,7 +602,7 @@ def api_costo_dettaglio():
         GROUP BY MONTH(h.PostingDate), h.InvRsn, h.WAPMovementType, h.Currency, h.Fixing
         ORDER BY MONTH(h.PostingDate), h.InvRsn""", i=item, a=anno)
     return jsonify({"roll": roll, "eff": (eff[0] if eff else None), "mov": mov,
-                    "fornitore": (forn[0] if forn else None)})
+                    "fornitore": (forn[0] if forn else None), "kit": kit})
 
 
 @app.get("/api/cerca_articolo")
@@ -1370,7 +1384,21 @@ function renderCostoDett(d){
   let h=`<div class="dbox">`;
   h+=`<p><strong>Costo efficace</strong>: ${e?eur(e.CostoEff):'—'}`
      +(e?` <span class="pill">${esc(e.Fonte)}</span> &nbsp; puro ${eur(e.PuroUnit)} + oneri ${eur(e.OneriUnit)}`:'')+`</p>`;
-  if(d.fornitore) h+=`<p style="margin-top:-6px"><strong>Fornitore preferenziale</strong>: ${esc(d.fornitore.CompanyName||d.fornitore.Supplier)}${d.fornitore.CompanyName?` <span class="muted">(${esc(d.fornitore.Supplier)})</span>`:''}</p>`;
+  if(d.fornitore){ const noi=String(d.fornitore.Supplier||'').trim()==='9998';
+    h+=`<p style="margin-top:-6px"><strong>Fornitore preferenziale</strong>: ${esc(d.fornitore.CompanyName||d.fornitore.Supplier)}${d.fornitore.CompanyName?` <span class="muted">(${esc(d.fornitore.Supplier)})</span>`:''}${noi?` <span class="pill">noi · assemblaggio interno</span>`:''}</p>`; }
+  if((d.kit||[]).length){
+    const somma=d.kit.reduce((s,k)=>s+Number(k.Qty||0)*Number(k.costo||0),0);
+    h+=`<div class="panel" style="background:#eef3ee;border-color:#cfe0cf;margin:8px 0">
+      <p style="margin:0 0 6px"><strong>Articolo KIT</strong> — non ha WAP/movimenti di magazzino propri: il costo nasce
+      <strong>esplodendo la distinta</strong> sui costi dei componenti. (Per questo "Costo efficace" e il roll WAP qui sotto risultano vuoti.)</p>
+      <table><thead><tr><th>Componente</th><th>Descrizione</th><th class="num">Q.tà</th><th class="num">Costo unit.</th><th class="num">Costo × q.tà</th></tr></thead><tbody>`;
+    h+= d.kit.map(k=>`<tr><td><a href="#" onclick="costoDett('${esc(k.Item)}',this);return false"><code>${esc(k.Item)}</code></a></td>
+      <td>${esc((k.descr||'').slice(0,42))}</td><td class="num">${num(k.Qty)}</td>
+      <td class="num">${k.costo!=null?eur(k.costo):'<span class="muted">— (nessun costo)</span>'}</td>
+      <td class="num">${k.costo!=null?eur(Number(k.Qty||0)*Number(k.costo)):'—'}</td></tr>`).join("");
+    h+=`<tr style="font-weight:700;background:#dfeadf"><td colspan="4">Costo del kit (somma componenti)</td><td class="num">${eur(somma)}</td></tr>`;
+    h+=`</tbody></table></div>`;
+  }
   h+=`<h3 class="sec">Formazione del WAP mese per mese</h3>
       <table><thead><tr><th>Mese</th><th class="num">Q.tà iniz</th><th class="num">Acq. q</th><th class="num">Acq. puro</th>
       <th class="num">Acq. oneri</th><th class="num">Vend.</th><th class="num">Resi</th><th class="num">Rett./Trasf</th>
