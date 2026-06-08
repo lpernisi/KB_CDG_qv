@@ -857,6 +857,11 @@ PAGINA = r"""<!DOCTYPE html>
 </div>
 <script>
 const $=s=>document.querySelector(s);
+// Se l'app e' pubblicata sotto un sotto-percorso IIS (es. /tools/cdg/), antepone il prefisso a
+// tutte le chiamate /api/... cosi' il reverse-proxy le instrada correttamente. A radice = nessun effetto.
+const API = location.pathname.replace(/\/+$/,'');
+const _origFetch = window.fetch.bind(window);
+window.fetch = (u, o) => _origFetch((typeof u === 'string' && u.indexOf('/api/') === 0) ? API + u : u, o);
 const eur=x=>(x==null?"—":Number(x).toLocaleString("it-IT",{minimumFractionDigits:2,maximumFractionDigits:2})+" €");
 const num=x=>(x==null?"—":Number(x).toLocaleString("it-IT"));
 let PER=null, SEL=null, PERIODI=[], SEZ='ricavi', SUBV='qual', SUBW='costi';
