@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Reverse proxy IIS sull'ALTRO server (quello con le altre applicazioni) -> backend su VM2MAGO
+  attraverso la VPN WireGuard. VM2MAGO ha IP VPN 10.8.0.2 e il backend ascolta sulla 8765.
+  Rinominare in "web.config" nella root del sito/applicazione IIS dedicata a CDG_QV.
+  Prerequisiti su QUESTO server: moduli URL Rewrite + Application Request Routing, proxy ARR abilitato.
+-->
+<configuration>
+  <system.webServer>
+    <rewrite>
+      <rules>
+        <rule name="CDG_QV proxy via VPN" stopProcessing="true">
+          <match url="(.*)" />
+          <action type="Rewrite" url="http://10.8.0.2:8765/{R:1}" />
+          <serverVariables>
+            <set name="HTTP_X_FORWARDED_PROTO" value="https" />
+          </serverVariables>
+        </rule>
+      </rules>
+    </rewrite>
+    <proxy xmlns="urn:schemas-microsoft-com:application-request-routing" timeout="00:05:00" />
+  </system.webServer>
+</configuration>
