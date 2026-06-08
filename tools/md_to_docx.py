@@ -16,9 +16,17 @@ from docx.shared import Pt, RGBColor, Inches
 
 INLINE = re.compile(r'(\*\*.+?\*\*|`[^`]+?`|\*[^*]+?\*)')
 
+# Le emoji "semaforo" non sono nei font PDF standard (escono come quadratini):
+# le rendiamo con un pallino "●" (presente in ogni font) colorato.
+SEMAFORO = {
+    '🟢': RGBColor(0x1A, 0x7F, 0x37),   # verde
+    '🟡': RGBColor(0xC9, 0x8A, 0x00),   # ambra
+    '🔴': RGBColor(0xC0, 0x39, 0x2B),   # rosso
+}
+EMOJI = re.compile('([%s])' % ''.join(SEMAFORO))
 
-def add_runs(p, text):
-    """Aggiunge a un paragrafo i 'run' con la formattazione inline."""
+
+def _inline(p, text):
     for tok in INLINE.split(text):
         if not tok:
             continue
@@ -33,6 +41,17 @@ def add_runs(p, text):
             p.add_run(tok[1:-1]).italic = True
         else:
             p.add_run(tok)
+
+
+def add_runs(p, text):
+    """Aggiunge i 'run' con la formattazione inline; le emoji semaforo -> pallino colorato."""
+    for seg in EMOJI.split(text):
+        if seg in SEMAFORO:
+            r = p.add_run('●')        # ●
+            r.bold = True
+            r.font.color.rgb = SEMAFORO[seg]
+        elif seg:
+            _inline(p, seg)
 
 
 def convert(src: Path, out: Path):
