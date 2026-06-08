@@ -674,6 +674,49 @@ def api_consolida_mese():
     return jsonify({"ok": True})
 
 
+@app.get("/api/ce")
+def api_ce():
+    """Conto Economico per dimensione (alla Qlik). Fatturato + Materiale (nostro costo) + Margine,
+    con la dimensione scelta (Canale=categoria cliente, Dipartimento, Cliente, Agente, Tipo/Linea Articolo, Mese)."""
+    anno = int(request.args.get("anno"))
+    mese = request.args.get("mese")
+    dim = request.args.get("dim", "canale")
+    DIMS = {
+        "canale":        "CASE WHEN sd.CustSupp='135774' THEN 'SAVINI' ELSE COALESCE(NULLIF(LTRIM(RTRIM(ctg.Notes)),''), opt.Category, '(n/d)') END",
+        "dipartimento":  "CASE WHEN ctg.Notes IN ('BTOB tradizionale','Professionale','Intercompany Savini') THEN 'BTOB' ELSE 'ONLINE' END",
+        "cliente":       "COALESCE(cs.CompanyName, sd.CustSupp)",
+        "agente":        "COALESCE(sp.Name, opt.Salesperson, '(n/d)')",
+        "tipo_articolo": "COALESCE(ity.Description, it.ItemType, '(n/d)')",
+        "linea_articolo":"COALESCE(hc.Description, it.HomogeneousCtg, '(n/d)')",
+        "mese":          "RIGHT('0'+CAST(f.mese AS varchar(2)),2)",
+    }
+    col = DIMS.get(dim, DIMS["canale"])
+    params = {"anno": anno}
+    wmese = ""
+    if mese and mese not in ("0", ""):
+        wmese = " AND f.mese = :mese"; params["mese"] = int(mese)
+    rows = righe(f"""
+        SELECT {col} AS dim,
+               SUM(f.ricavo_netto)            AS fatturato,
+               SUM(f.ricavo_netto - f.mdc1)   AS materiale,
+               SUM(f.mdc1)                    AS margine,
+               COUNT(DISTINCT f.sale_doc_id)  AS n_ordini
+        FROM core.fatto_riga f
+        JOIN      KODICEBAGNO_4.dbo.MA_SaleDoc sd  ON sd.SaleDocId = f.sale_doc_id
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions opt ON opt.Customer = sd.CustSupp AND opt.CustSuppType = sd.CustSuppType
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustomerCtg ctg ON ctg.Category = opt.Category
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs  ON cs.CustSupp = sd.CustSupp AND cs.CustSuppType = sd.CustSuppType
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_SalesPeople sp ON sp.Salesperson = opt.Salesperson
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_Items it ON LTRIM(RTRIM(it.Item)) = f.codice_articolo
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_ItemTypes ity ON ity.CodeType = it.ItemType
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_HomogeneousCtg hc ON hc.Category = it.HomogeneousCtg
+        WHERE f.anno = :anno {wmese}
+        GROUP BY {col}
+        ORDER BY SUM(f.ricavo_netto) DESC
+    """, **params)
+    return jsonify({"dim": dim, "righe": rows})
+
+
 @app.get("/api/sql")
 def api_sql():
     res = []
@@ -925,14 +968,37 @@ function sottoWap(v){
   ['costi','anom'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
   if(v==='costi') caricaCosti(); else if(v==='anom') caricaAnom();
 }
+let CEDIM='canale';
+function setCeDim(d){ CEDIM=d; caricaCE(); }
 async function caricaCE(){
   const {a,m}=periodo();
-  const p=(PERIODI||[]).find(x=>x.anno===a && x.mese===m)||{};
-  $("#ce").innerHTML=`<div class="cards">
-    <div class="kpi"><div class="v">${eur(p.ricavo)}</div><div class="l">Ricavo netto</div></div>
-    <div class="kpi"><div class="v">${eur(p.mdc1)}</div><div class="l">MdC I (ricavo − costo materiali)</div></div>
-  </div>
-  <p class="muted">Riepilogo del periodo ${a}-${String(m).padStart(2,'0')}. MdC II/III si popoleranno man mano che attiviamo le sezioni (commerciali, trasporti, imballi…). Dalle sezioni a sinistra verifichi e certifichi ogni componente del conto economico.</p>`;
+  const d=await j(`/api/ce?anno=${a}&mese=${m}&dim=${CEDIM}`);
+  const tot=d.righe.reduce((s,r)=>({f:s.f+Number(r.fatturato||0),ma:s.ma+Number(r.materiale||0),mg:s.mg+Number(r.margine||0)}),{f:0,ma:0,mg:0});
+  const pct=v=>tot.f?(100*v/tot.f).toFixed(1)+'%':'0%';
+  const dims=[['canale','Canale'],['dipartimento','Dipartimento'],['cliente','Cliente'],['agente','Agente'],['tipo_articolo','Tipo Articolo'],['linea_articolo','Linea Articolo'],['mese','Mese']];
+  const etich=dims.find(x=>x[0]===CEDIM)[1];
+  let h=`<div class="cards">
+    <div class="kpi"><div class="v">${eur(tot.f)}</div><div class="l">Fatturato</div></div>
+    <div class="kpi"><div class="v">${eur(tot.ma)}</div><div class="l">Materiale (nostro costo)</div></div>
+    <div class="kpi"><div class="v">${eur(tot.mg)}</div><div class="l">Margine</div></div>
+    <div class="kpi"><div class="v">${pct(tot.mg)}</div><div class="l">% Margine</div></div></div>
+  <p class="muted">Periodo ${a}-${String(m).padStart(2,'0')}. Dimensione: `
+    + dims.map(x=>`<a href="#" onclick="setCeDim('${x[0]}');return false" style="margin:0 4px;${CEDIM===x[0]?'font-weight:700;text-decoration:underline':''}">${x[1]}</a>`).join('·')
+    + `. <em>Materiale</em> = nostro costo certificato (ricalcolo WAP). Imballi/Trasporto/Commerciali/Finanziari in costruzione (verranno dalle stesse fonti del CE Qlik).</p>`;
+  h+=`<div class="panel" style="padding:0"><div style="max-height:62vh;overflow:auto"><table class="sticky"><thead><tr>
+    <th>${etich}</th><th class="num">Fatturato</th><th class="num">Materiale</th><th class="num">Imballi</th>
+    <th class="num">Trasporto</th><th class="num">Commerciali</th><th class="num">Finanziari</th>
+    <th class="num">Margine</th><th class="num">% Margine</th><th class="num">Nr. Ordini</th></tr></thead><tbody>`;
+  h+=`<tr style="font-weight:700;background:#efeae0"><td>Totali</td><td class="num">${eur(tot.f)}</td><td class="num">${eur(tot.ma)}</td>
+    <td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>
+    <td class="num">${eur(tot.mg)}</td><td class="num">${pct(tot.mg)}</td><td class="num"></td></tr>`;
+  h+=d.righe.map(r=>`<tr><td>${esc(r.dim||'(n/d)')}</td>
+    <td class="num">${eur(r.fatturato)}</td><td class="num">${eur(r.materiale)}</td>
+    <td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>
+    <td class="num">${eur(r.margine)}</td><td class="num">${r.fatturato?(100*Number(r.margine)/Number(r.fatturato)).toFixed(1):'0'}%</td>
+    <td class="num">${num(r.n_ordini)}</td></tr>`).join("") || `<tr><td colspan="10" class="muted">Nessun dato.</td></tr>`;
+  h+=`</tbody></table></div></div>`;
+  $("#ce").innerHTML=h;
 }
 
 let deb;
