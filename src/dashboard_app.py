@@ -767,6 +767,9 @@ PAGINA = r"""<!DOCTYPE html>
   .banner{padding:10px 14px;border-radius:10px;margin:0 0 14px;font-size:13.5px;border:1px solid var(--line)}
   .banner.ok{background:var(--okbg);border-color:#bfe0cb}
   .banner.warn{background:var(--warnbg);border-color:#e6d3b3}
+  .expbtn{float:right;font:inherit;font-size:11.5px;border:1px solid var(--line);background:#fff;border-radius:6px;
+          padding:2px 9px;cursor:pointer;color:var(--accent);margin:0 0 6px 8px}
+  .expbtn:hover{background:#eef2f7}
   .row{display:grid;grid-template-columns:380px 1fr;gap:20px}
   @media(max-width:900px){.row{grid-template-columns:1fr}}
   .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
@@ -911,6 +914,30 @@ let PER=null, SEL=null, PERIODI=[], SEZ='ricavi', SUBV='qual', SUBW='costi';
 
 async function j(u){ const r=await fetch(u); return r.json(); }
 
+// ---- Export Excel: un'icona su ogni tabella (auto, anche per quelle caricate dopo) ----
+function nomeExport(){ const s=document.querySelector('.side .sec.on'); return 'CDG_'+((s?s.textContent:'export').trim().replace(/[^A-Za-z0-9]+/g,'_')); }
+function tableToXls(tbl){
+  const clone=tbl.cloneNode(true);
+  clone.querySelectorAll('.noexp,.expbtn,a').forEach(e=>{ if(e.tagName==='A'){ e.replaceWith(document.createTextNode(e.textContent)); } else { e.remove(); } });
+  const html='<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8">'
+    +'<style>table,th,td{border:1px solid #ccc;border-collapse:collapse;padding:3px 6px;font-family:Arial;font-size:11px}</style></head>'
+    +'<body>'+clone.outerHTML+'</body></html>';
+  const blob=new Blob(['﻿'+html],{type:'application/vnd.ms-excel'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download=nomeExport()+'.xls'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+function aggiungiExport(tbl){
+  if(tbl.dataset.exp) return; tbl.dataset.exp='1';
+  const btn=document.createElement('button'); btn.className='expbtn'; btn.title='Esporta la tabella in Excel';
+  btn.textContent='Excel ↓';
+  btn.onclick=(e)=>{ e.preventDefault(); e.stopPropagation(); tableToXls(tbl); };
+  let anchor=tbl; const wrap=tbl.closest('div[style*="overflow"]'); if(wrap) anchor=wrap;
+  if(anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor);
+}
+function scanExport(){ document.querySelectorAll('.content table').forEach(aggiungiExport); }
+let _scanT;
+function avviaExport(){ const o=new MutationObserver(()=>{ clearTimeout(_scanT); _scanT=setTimeout(scanExport,150); }); o.observe(document.body,{childList:true,subtree:true}); scanExport(); }
+
 async function init(){
   const ps=await j("/api/periodi");
   const sel=$("#periodo");
@@ -922,6 +949,7 @@ async function init(){
   else if(['anom','costi'].includes(h)){ SUBW=h; sezione('wap'); }
   else if(['ce','ricavi','materiali','wap','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
   else sezione('ricavi');
+  avviaExport();
 }
 function periodo(){ const [a,m]=$("#periodo").value.split("-"); return {a:+a,m:+m}; }
 function onPeriodo(){ SEL=null; cerca();

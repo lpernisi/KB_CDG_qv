@@ -36,11 +36,12 @@ Sotto, quattro viste:
   calcolo) o **Ignorare** (caso noto). *Cliccando il codice articolo* si apre la **scheda costo** (sotto).
 
 **2) Bonifica apertura** — è un'attività **una-tantum**: alcuni articoli partivano il 2026 con un valore d'apertura
-errato (eredità del vecchio gestionale). Qui si forza il valore corretto, verificandolo. Man mano che si certificano,
-questa lista si **esaurisce**.
+errato (eredità del vecchio costo del gestionale). Qui si forza il valore corretto, verificandolo. Man mano che si 
+certificano, questa lista si **esaurisce**.
 
 **3) Trend del costo** — evidenzia gli articoli il cui **costo è salito o sceso** oltre una soglia % (regolabile)
-negli ultimi mesi: servono per individuare variazioni anomale da verificare con l'ufficio acquisti.
+negli ultimi mesi: servono per individuare variazioni anomale da verificare con l'ufficio acquisti, o per avere un 
+alert che potrebbe richiedere o suggerire un intervento sui prezzi di vendita.
 
 **4) Scheda costo (clic sul codice articolo)** — mostra *come si è formato* il costo: il **fornitore preferenziale**,
 il roll mese per mese (giacenza, acquisti puro/oneri, vendite, costo) e l'elenco dei **movimenti** (acquisti, cambi,
@@ -55,7 +56,8 @@ In cima alla sezione, per il mese selezionato, una fascia indica:
   momento i costi del mese sono la **base solida** per valorizzare le vendite del mese successivo.
 
 **Istruzione operativa:** a fine mese, quando l'Amministrazione ha registrato tutte le fatture d'acquisto/oneri del
-periodo, preme **"Consolida prezzi del mese"**. Prima di allora i numeri vanno letti come **stima provvisoria**.
+periodo, verifica i costi che potrebbero essere anomali, e una volta che i costi sono corretti 
+preme **"Consolida prezzi del mese"**. Prima di allora i numeri vanno letti come **stima provvisoria**.
 
 ## Come interpretare i numeri (regole pratiche)
 - Il **Materiale** nel Conto Economico (sezione *Riepilogo CE*, per Canale/Cliente/…) usa **questo** costo, non più
