@@ -665,6 +665,30 @@ def api_rilancia_ricalcolo():
     return jsonify({"ok": True, "anno": anno})
 
 
+@app.post("/api/elabora_mese")
+def api_elabora_mese():
+    """Elabora un mese: prepara i costi (motore) -> carica le vendite da Mago -> componenti attivi -> assembla
+    core.fatto_riga. NON rilancia il ricalcolo WAP (annuale, ha il suo pulsante). Stesso ordine di run_pipeline."""
+    d = request.get_json(force=True) or {}
+    anno = int(d.get("anno", 2026)); mese = int(d.get("mese", 1))
+    passi = []
+    with engine.begin() as c:
+        c.exec_driver_sql(f"EXEC core.usp_prepara_costi @schema_azienda='kodice', @anno={anno}, @mese={mese};")
+        passi.append("prepara_costi")
+        c.exec_driver_sql(f"EXEC dbo.usp_load_righe_vendita @anno={anno}, @mese={mese};")
+        passi.append("load_righe_vendita")
+        attivi = [r[0] for r in c.exec_driver_sql(
+            "SELECT codice_componente FROM cfg.componenti WHERE attivo=1 ORDER BY livello, codice_componente")]
+        for cod in attivi:
+            c.exec_driver_sql(f"EXEC dbo.usp_comp_{cod} @anno={anno}, @mese={mese};")
+            passi.append(f"comp_{cod}")
+        c.exec_driver_sql(f"EXEC dbo.usp_build_fatto_riga @anno={anno}, @mese={mese};")
+        passi.append("build_fatto_riga")
+        n = list(c.exec_driver_sql(
+            f"SELECT COUNT(*) FROM core.fatto_riga WHERE anno={anno} AND mese={mese}"))[0][0]
+    return jsonify({"ok": True, "anno": anno, "mese": mese, "passi": passi, "righe": n})
+
+
 @app.get("/api/stato_mese")
 def api_stato_mese():
     """Stato di consolidamento del costo del mese (CONSOLIDATO / IN_FORMAZIONE)."""
@@ -916,7 +940,10 @@ PAGINA = r"""<!DOCTYPE html>
     <section id="sec-materiali" class="sez-main" style="display:none">
       <h2 class="grp">Costo dei materiali · nostro costo (fonte principale)</h2>
       <p class="muted" style="margin-top:-4px">Basato sul ricalcolo parallelo mensile (<code>kodice.wap_ricalc</code> / <code>vw_costo_eff</code>). MA_ItemsWAP non è più la fonte: resta solo come <strong>raffronto</strong> (sezione dedicata a sinistra).</p>
-      <p style="margin:2px 0 8px"><a href="#" onclick="rilanciaRic();return false" style="display:inline-block;padding:5px 12px;background:#2f5d8a;color:#fff;border-radius:5px;text-decoration:none;font-weight:600">↻ Ricalcola i costi dell'anno in corso</a> <span class="muted">applica le bonifiche e ricostruisce il WAP mese per mese (pochi secondi); poi rivedi e consolida i mesi.</span></p>
+      <p style="margin:2px 0 8px">
+        <a href="#" onclick="elaboraMese();return false" style="display:inline-block;padding:5px 12px;background:#2f7d52;color:#fff;border-radius:5px;text-decoration:none;font-weight:600">▶ Elabora questo mese</a>
+        <a href="#" onclick="rilanciaRic();return false" style="display:inline-block;padding:5px 12px;background:#2f5d8a;color:#fff;border-radius:5px;text-decoration:none;font-weight:600;margin-left:6px">↻ Ricalcola WAP anno in corso</a>
+        <span class="muted"> &nbsp;<strong>Elabora</strong> = carica vendite + prepara costi + assembla il mese selezionato. <strong>Ricalcola WAP</strong> = ricostruisce i costi di magazzino dell'anno (dopo le bonifiche).</span></p>
       <div id="mesebanner"></div>
       <div class="subtabs">
         <div class="subtab on" data-sv="qual" onclick="sottoVista('qual')">Certificazione qualità</div>
@@ -1361,6 +1388,15 @@ async function certifBon(item, costo, rimuovi){
        body:JSON.stringify({item, rimuovi:1})});
   }
   caricaBonifica();
+}
+async function elaboraMese(){
+  const {a,m}=periodo();
+  if(!confirm(`Elaboro il mese ${a}-${String(m).padStart(2,'0')}? Carico vendite da Mago, preparo i costi e assemblo i margini (qualche secondo).`)) return;
+  let r=null;
+  try{ const resp=await fetch('/api/elabora_mese',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({anno:a,mese:m})}); r=await resp.json(); }catch(e){ r=null; }
+  if(r&&r.ok){ alert(`Mese ${a}-${String(m).padStart(2,'0')} elaborato: ${r.righe} righe in fatto_riga.\nPassi: ${r.passi.join(' → ')}`); }
+  else { alert('Elaborazione non riuscita: controlla il log del backend.'); }
+  aggiornaStatoMese(); sottoVista(SUBV||'qual');
 }
 async function rilanciaRic(){
   if(!confirm('Rilancio il ricalcolo 2026 con le aperture certificate? (qualche secondo)')) return;
