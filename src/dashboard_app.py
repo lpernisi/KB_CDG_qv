@@ -319,6 +319,53 @@ def api_costi_wap():
     })
 
 
+@app.get("/api/trend_costo")
+def api_trend_costo():
+    """Trend del NOSTRO costo (kodice.wap_ricalc): confronta il costo dell'ultimo mese con costo>0
+    e quello di ~N mesi prima; evidenzia gli articoli oltre la soglia % (in aumento o in calo).
+    E' l'equivalente di /api/costi_wap ma sul costo calcolato da noi, non sul WAP di Mago."""
+    try:
+        mesi = int(request.args.get("mesi", 3))
+    except Exception:
+        mesi = 3
+    if mesi not in (1, 2, 3, 6):
+        mesi = 3
+    try:
+        soglia = float(request.args.get("soglia", 10))
+    except Exception:
+        soglia = 10.0
+    return jsonify({
+        "mesi": mesi, "soglia": soglia,
+        "righe": righe("""
+            WITH r AS (
+                SELECT Item, Mese, WAPCost_ricalc AS costo, QtaFin
+                FROM kodice.wap_ricalc WHERE Anno = 2026 AND WAPCost_ricalc > 0
+            ),
+            nuovo AS (
+                SELECT Item, Mese, costo, QtaFin FROM (
+                    SELECT Item, Mese, costo, QtaFin, ROW_NUMBER() OVER (PARTITION BY Item ORDER BY Mese DESC) rn FROM r
+                ) t WHERE rn = 1
+            ),
+            rif AS (
+                SELECT n.Item, x.costo AS costo_rif, x.Mese AS mese_rif
+                FROM nuovo n
+                CROSS APPLY (SELECT TOP 1 costo, Mese FROM r
+                             WHERE r.Item = n.Item AND r.Mese <= n.Mese - :mesi ORDER BY Mese DESC) x
+            )
+            SELECT TOP 600 n.Item, i.Description AS descr,
+                   CAST(n.QtaFin AS DECIMAL(18,2)) AS giacenza,
+                   CAST(rif.costo_rif AS DECIMAL(18,4)) AS costo_rif, rif.mese_rif,
+                   CAST(n.costo AS DECIMAL(18,4)) AS costo_attuale, n.Mese AS mese_attuale,
+                   CAST(n.costo - rif.costo_rif AS DECIMAL(18,4)) AS delta,
+                   CAST(100.0*(n.costo - rif.costo_rif)/NULLIF(rif.costo_rif,0) AS DECIMAL(9,1)) AS pct
+            FROM nuovo n JOIN rif ON rif.Item = n.Item
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_Items i ON LTRIM(RTRIM(i.Item)) = n.Item
+            WHERE ABS(100.0*(n.costo - rif.costo_rif)/NULLIF(rif.costo_rif,0)) >= :soglia
+            ORDER BY ABS(100.0*(n.costo - rif.costo_rif)/NULLIF(rif.costo_rif,0)) DESC
+        """, mesi=mesi, soglia=soglia)
+    })
+
+
 @app.get("/api/diagnosi_articolo")
 def api_diagnosi_articolo():
     """Perche' un articolo non ha costo certificato nel mese: se e' un KIT esplode la distinta
@@ -701,6 +748,8 @@ PAGINA = r"""<!DOCTYPE html>
     <div class="sec todo" data-s="finanziari" onclick="sezione('finanziari')">Costi finanziari</div>
     <div class="sec todo" data-s="resi" onclick="sezione('resi')">Resi da clienti</div>
     <div class="sec todo" data-s="recuperi" onclick="sezione('recuperi')">Recuperi forn./trasp.</div>
+    <div class="navg">Raffronto (non nel CE)</div>
+    <div class="sec" data-s="wap" onclick="sezione('wap')">MA_ItemsWAP</div>
     <div class="navg">Strumenti</div>
     <div class="sec" data-s="sql" onclick="sezione('sql')">Documentazione SQL</div>
   </nav>
@@ -725,17 +774,27 @@ PAGINA = r"""<!DOCTYPE html>
     </section>
 
     <section id="sec-materiali" class="sez-main" style="display:none">
-      <h2 class="grp">Costo dei materiali</h2>
+      <h2 class="grp">Costo dei materiali · nostro costo (fonte principale)</h2>
+      <p class="muted" style="margin-top:-4px">Basato sul ricalcolo parallelo mensile (<code>kodice.wap_ricalc</code> / <code>vw_costo_eff</code>). MA_ItemsWAP non è più la fonte: resta solo come <strong>raffronto</strong> (sezione dedicata a sinistra).</p>
       <div class="subtabs">
-        <div class="subtab on" data-sv="anom" onclick="sottoVista('anom')">Anomalie</div>
-        <div class="subtab" data-sv="costi" onclick="sottoVista('costi')">Costi · raffronto Mago</div>
-        <div class="subtab" data-sv="qual" onclick="sottoVista('qual')">Certificazione qualità</div>
+        <div class="subtab on" data-sv="qual" onclick="sottoVista('qual')">Certificazione qualità</div>
         <div class="subtab" data-sv="bonifica" onclick="sottoVista('bonifica')">Bonifica apertura</div>
+        <div class="subtab" data-sv="trend" onclick="sottoVista('trend')">Trend del costo</div>
       </div>
-      <div id="v-anom"><div id="anom"><p class="muted">Carico…</p></div></div>
-      <div id="v-costi" style="display:none"><div id="costi"><p class="muted">Carico…</p></div></div>
-      <div id="v-qual" style="display:none"><div id="qual"><p class="muted">Carico…</p></div></div>
+      <div id="v-qual"><div id="qual"><p class="muted">Carico…</p></div></div>
       <div id="v-bonifica" style="display:none"><div id="bonifica"><p class="muted">Carico…</p></div></div>
+      <div id="v-trend" style="display:none"><div id="trend"><p class="muted">Carico…</p></div></div>
+    </section>
+
+    <section id="sec-wap" class="sez-main" style="display:none">
+      <h2 class="grp">MA_ItemsWAP · raffronto (NON usato nel conto economico)</h2>
+      <p class="muted" style="margin-top:-4px">Dati del WAP di Mago, tenuti solo per <strong>confronto</strong>: nel conto economico il costo dei materiali userà il <strong>nostro</strong> calcolo. Anche le anomalie del motore attuale (basato su MA_ItemsWAP) sono qui finché non spostiamo il COGS sul nuovo costo.</p>
+      <div class="subtabs">
+        <div class="subtab on" data-sw="costi" onclick="sottoWap('costi')">Trend WAP Mago</div>
+        <div class="subtab" data-sw="anom" onclick="sottoWap('anom')">Anomalie motore (attuale)</div>
+      </div>
+      <div id="v-costi"><div id="costi"><p class="muted">Carico…</p></div></div>
+      <div id="v-anom" style="display:none"><div id="anom"><p class="muted">Carico…</p></div></div>
     </section>
 
     <section id="sec-commerciali" class="sez-main" style="display:none"><h2 class="grp">Costi commerciali</h2>
@@ -762,7 +821,7 @@ PAGINA = r"""<!DOCTYPE html>
 const $=s=>document.querySelector(s);
 const eur=x=>(x==null?"—":Number(x).toLocaleString("it-IT",{minimumFractionDigits:2,maximumFractionDigits:2})+" €");
 const num=x=>(x==null?"—":Number(x).toLocaleString("it-IT"));
-let PER=null, SEL=null, PERIODI=[], SEZ='ricavi', SUBV='anom';
+let PER=null, SEL=null, PERIODI=[], SEZ='ricavi', SUBV='qual', SUBW='costi';
 
 async function j(u){ const r=await fetch(u); return r.json(); }
 
@@ -773,14 +832,16 @@ async function init(){
   if(ps.length){ sel.value=`${ps[ps.length-1].anno}-${ps[ps.length-1].mese}`; }
   PERIODI=ps; sel.onchange=onPeriodo;
   const h=location.hash.replace('#','');
-  if(['anom','costi','qual','bonifica'].includes(h)){ SUBV=h; sezione('materiali'); }
-  else if(['ce','ricavi','materiali','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
+  if(['qual','bonifica','trend'].includes(h)){ SUBV=h; sezione('materiali'); }
+  else if(['anom','costi'].includes(h)){ SUBW=h; sezione('wap'); }
+  else if(['ce','ricavi','materiali','wap','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
   else sezione('ricavi');
 }
 function periodo(){ const [a,m]=$("#periodo").value.split("-"); return {a:+a,m:+m}; }
 function onPeriodo(){ SEL=null; cerca();
   if(SEZ==='ce') caricaCE();
   if(SEZ==='materiali') caricaSub();
+  if(SEZ==='wap') sottoWap(SUBW);
 }
 function sezione(s){
   SEZ=s; location.hash=s;
@@ -789,17 +850,21 @@ function sezione(s){
   if(s==='ce') caricaCE();
   else if(s==='ricavi') cerca();
   else if(s==='materiali') sottoVista(SUBV);
+  else if(s==='wap') sottoWap(SUBW);
   else if(s==='sql') caricaSql();
 }
 function sottoVista(v){
   SUBV=v;
   document.querySelectorAll('#sec-materiali .subtab').forEach(e=>e.classList.toggle('on',e.dataset.sv===v));
-  ['anom','costi','qual','bonifica'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
-  caricaSub();
+  ['qual','bonifica','trend'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
+  if(v==='qual') caricaQual(); else if(v==='bonifica') caricaBonifica(); else if(v==='trend') caricaTrend();
 }
-function caricaSub(){
-  if(SUBV==='anom') caricaAnom(); else if(SUBV==='costi') caricaCosti();
-  else if(SUBV==='qual') caricaQual(); else if(SUBV==='bonifica') caricaBonifica();
+function caricaSub(){ sottoVista(SUBV); }
+function sottoWap(v){
+  SUBW=v;
+  document.querySelectorAll('#sec-wap .subtab').forEach(e=>e.classList.toggle('on',e.dataset.sw===v));
+  ['costi','anom'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
+  if(v==='costi') caricaCosti(); else if(v==='anom') caricaAnom();
 }
 async function caricaCE(){
   const {a,m}=periodo();
@@ -907,6 +972,39 @@ async function caricaCosti(){
   };
   h+= tabella(su,"📈 Costo in AUMENTO") + tabella(giu,"📉 Costo in CALO");
   $("#costi").innerHTML=h;
+}
+let TRENDMESI=3, TRENDSOGLIA=10;
+function setTrend(mesi,soglia){ if(mesi!=null)TRENDMESI=mesi; if(soglia!=null)TRENDSOGLIA=soglia; caricaTrend(); }
+async function caricaTrend(){
+  const d=await j(`/api/trend_costo?mesi=${TRENDMESI}&soglia=${TRENDSOGLIA}`);
+  const su=d.righe.filter(x=>Number(x.delta)>0).sort((a,b)=>Number(b.pct)-Number(a.pct));
+  const giu=d.righe.filter(x=>Number(x.delta)<0).sort((a,b)=>Number(a.pct)-Number(b.pct));
+  const M=['','Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
+  let h=`<div class="cards">
+    <div class="kpi bad"><div class="v">${num(su.length)}</div><div class="l">costo in AUMENTO</div></div>
+    <div class="kpi"><div class="v">${num(giu.length)}</div><div class="l">costo in CALO</div></div>
+    <div class="kpi"><div class="v">${TRENDMESI} mesi</div><div class="l">orizzonte</div></div>
+    <div class="kpi"><div class="v">&ge; ${TRENDSOGLIA}%</div><div class="l">soglia evidenziata</div></div></div>
+  <p class="muted">Variazione del <strong>nostro costo</strong> (wap_ricalc): ultimo mese vs ~${TRENDMESI} mesi prima, oltre soglia → da verificare. Orizzonte: `
+     + [1,2,3,6].map(m=>`<a href="#" onclick="setTrend(${m},null);return false" style="margin:0 4px;${m===TRENDMESI?'font-weight:700;text-decoration:underline':''}">${m}m</a>`).join('·')
+     + ` · Soglia: ` + [5,10,20,30].map(s=>`<a href="#" onclick="setTrend(null,${s});return false" style="margin:0 4px;${s===TRENDSOGLIA?'font-weight:700;text-decoration:underline':''}">${s}%</a>`).join('·') + `</p>`;
+  const col=x=>Number(x)>0?'color:var(--bad)':'color:#1a7f37';
+  const tab=(arr,tit)=>{
+    let t=`<details class="sez" open><summary>${tit}<span class="cnt">${arr.length}</span></summary><div class="panel" style="padding:0"><div style="max-height:60vh;overflow:auto"><table class="sticky">`
+      +`<thead><tr><th>Articolo</th><th>Descrizione</th><th class="num">Giac.</th><th class="num">Costo ~${TRENDMESI}m fa</th><th class="num">Costo attuale</th><th class="num">Δ</th><th class="num">Δ%</th></tr></thead><tbody>`;
+    t+=arr.slice(0,400).map(x=>`<tr>
+        <td><a href="#" onclick="costoDett('${esc(x.Item)}',this);return false"><code>${esc(x.Item)}</code></a></td>
+        <td>${esc((x.descr||'').slice(0,44))}</td>
+        <td class="num">${num(x.giacenza)}</td>
+        <td class="num">${eur(x.costo_rif)}<br><span class="muted" style="font-size:11px">${M[x.mese_rif]||''}</span></td>
+        <td class="num">${eur(x.costo_attuale)}<br><span class="muted" style="font-size:11px">${M[x.mese_attuale]||''}</span></td>
+        <td class="num" style="${col(x.delta)}">${Number(x.delta)>0?'+':''}${eur(x.delta)}</td>
+        <td class="num" style="${col(x.pct)};font-weight:600">${Number(x.pct)>0?'+':''}${x.pct}%</td></tr>`).join("")
+      || `<tr><td colspan="7" class="muted">Nessun articolo oltre soglia.</td></tr>`;
+    return t+`</tbody></table></div></div></details>`;
+  };
+  h+= tab(su,"📈 Costo in AUMENTO") + tab(giu,"📉 Costo in CALO");
+  $("#trend").innerHTML=h;
 }
 const dot=c=>`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${c};margin-right:5px;vertical-align:middle"></span>`;
 async function caricaQual(){
