@@ -573,6 +573,11 @@ def api_costo_dettaglio():
                QtaVend, QtaResi, QtaRettTrasf, QtaFin, PuroUnit, OneriUnit, WAPCost_ricalc, WAPCost_Mago
         FROM kodice.wap_ricalc WHERE Item=:i AND Anno=:a ORDER BY Mese""", i=item, a=anno)
     eff = righe("SELECT Fonte, CostoEff, PuroUnit, OneriUnit, ValuationType FROM kodice.vw_costo_eff WHERE Item=:i", i=item)
+    forn = righe("""
+        SELECT TOP 1 LTRIM(RTRIM(g.Supplier)) AS Supplier, cs.CompanyName
+        FROM KODICEBAGNO_4.dbo.MA_ItemsGoodsData g
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = g.Supplier
+        WHERE LTRIM(RTRIM(g.Item)) = :i AND g.Supplier IS NOT NULL AND g.Supplier <> ''""", i=item)
     mov = righe("""
         SELECT MONTH(h.PostingDate) AS Mese, h.InvRsn, h.WAPMovementType, h.Currency, h.Fixing,
                SUM(d.Qty) AS qty, SUM(d.LineAmount) AS lineamt,
@@ -582,7 +587,8 @@ def api_costo_dettaglio():
         WHERE LTRIM(RTRIM(d.Item)) = :i AND YEAR(h.PostingDate) = :a
         GROUP BY MONTH(h.PostingDate), h.InvRsn, h.WAPMovementType, h.Currency, h.Fixing
         ORDER BY MONTH(h.PostingDate), h.InvRsn""", i=item, a=anno)
-    return jsonify({"roll": roll, "eff": (eff[0] if eff else None), "mov": mov})
+    return jsonify({"roll": roll, "eff": (eff[0] if eff else None), "mov": mov,
+                    "fornitore": (forn[0] if forn else None)})
 
 
 @app.get("/api/cerca_articolo")
@@ -640,6 +646,34 @@ def api_rilancia_ricalcolo():
     return jsonify({"ok": True, "anno": anno})
 
 
+@app.get("/api/stato_mese")
+def api_stato_mese():
+    """Stato di consolidamento del costo del mese (CONSOLIDATO / IN_FORMAZIONE)."""
+    a = int(request.args.get("anno")); m = int(request.args.get("mese"))
+    r = righe("SELECT Stato, Utente, CONVERT(varchar(16), DataStato, 120) AS DataStato, Nota "
+              "FROM kodice.costo_mese_stato WHERE Anno=:a AND Mese=:m", a=a, m=m)
+    return jsonify(r[0] if r else {"Stato": "IN_FORMAZIONE"})
+
+
+@app.post("/api/consolida_mese")
+def api_consolida_mese():
+    """Consolida (o riapre) i costi del mese: l'amministrazione certifica che tutti i documenti sono caricati."""
+    d = request.get_json(force=True); a = int(d["anno"]); m = int(d["mese"])
+    if d.get("riapri"):
+        with engine.begin() as c:
+            c.execute(text("DELETE FROM kodice.costo_mese_stato WHERE Anno=:a AND Mese=:m"), {"a": a, "m": m})
+        return jsonify({"ok": True, "riaperto": True})
+    p = {"a": a, "m": m, "u": d.get("utente", "dashboard"), "n": d.get("nota", "")}
+    with engine.begin() as c:
+        c.execute(text("""
+            MERGE kodice.costo_mese_stato AS t USING (SELECT :a AS Anno, :m AS Mese) s
+              ON t.Anno=s.Anno AND t.Mese=s.Mese
+            WHEN MATCHED THEN UPDATE SET Stato='CONSOLIDATO', Utente=:u, Nota=:n, DataStato=SYSDATETIME()
+            WHEN NOT MATCHED THEN INSERT (Anno,Mese,Stato,Utente,Nota,DataStato)
+                 VALUES (:a,:m,'CONSOLIDATO',:u,:n,SYSDATETIME());"""), p)
+    return jsonify({"ok": True})
+
+
 @app.get("/api/sql")
 def api_sql():
     res = []
@@ -687,6 +721,9 @@ PAGINA = r"""<!DOCTYPE html>
   .subtabs{display:flex;gap:6px;margin:0 0 16px;flex-wrap:wrap}
   .subtab{padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer;font-size:13px}
   .subtab.on{background:var(--accent);color:#fff;border-color:transparent}
+  .banner{padding:10px 14px;border-radius:10px;margin:0 0 14px;font-size:13.5px;border:1px solid var(--line)}
+  .banner.ok{background:var(--okbg);border-color:#bfe0cb}
+  .banner.warn{background:var(--warnbg);border-color:#e6d3b3}
   .row{display:grid;grid-template-columns:380px 1fr;gap:20px}
   @media(max-width:900px){.row{grid-template-columns:1fr}}
   .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
@@ -776,6 +813,7 @@ PAGINA = r"""<!DOCTYPE html>
     <section id="sec-materiali" class="sez-main" style="display:none">
       <h2 class="grp">Costo dei materiali · nostro costo (fonte principale)</h2>
       <p class="muted" style="margin-top:-4px">Basato sul ricalcolo parallelo mensile (<code>kodice.wap_ricalc</code> / <code>vw_costo_eff</code>). MA_ItemsWAP non è più la fonte: resta solo come <strong>raffronto</strong> (sezione dedicata a sinistra).</p>
+      <div id="mesebanner"></div>
       <div class="subtabs">
         <div class="subtab on" data-sv="qual" onclick="sottoVista('qual')">Certificazione qualità</div>
         <div class="subtab" data-sv="bonifica" onclick="sottoVista('bonifica')">Bonifica apertura</div>
@@ -840,7 +878,7 @@ async function init(){
 function periodo(){ const [a,m]=$("#periodo").value.split("-"); return {a:+a,m:+m}; }
 function onPeriodo(){ SEL=null; cerca();
   if(SEZ==='ce') caricaCE();
-  if(SEZ==='materiali') caricaSub();
+  if(SEZ==='materiali'){ aggiornaStatoMese(); caricaSub(); }
   if(SEZ==='wap') sottoWap(SUBW);
 }
 function sezione(s){
@@ -849,9 +887,25 @@ function sezione(s){
   document.querySelectorAll('.sez-main').forEach(e=>e.style.display=(e.id==='sec-'+s)?'':'none');
   if(s==='ce') caricaCE();
   else if(s==='ricavi') cerca();
-  else if(s==='materiali') sottoVista(SUBV);
+  else if(s==='materiali'){ aggiornaStatoMese(); sottoVista(SUBV); }
   else if(s==='wap') sottoWap(SUBW);
   else if(s==='sql') caricaSql();
+}
+async function aggiornaStatoMese(){
+  const {a,m}=periodo(); const mm=`${a}-${String(m).padStart(2,'0')}`;
+  const s=await j(`/api/stato_mese?anno=${a}&mese=${m}`);
+  if(s.Stato==='CONSOLIDATO'){
+    $("#mesebanner").innerHTML=`<div class="banner ok">${dot('#2f7d52')}<strong>Costi ${mm} CONSOLIDATI</strong> — certificato il ${esc(s.DataStato||'')}${s.Utente?' da '+esc(s.Utente):''}. Base solida per le vendite del mese successivo. <a href="#" onclick="consolidaMese(1);return false">riapri</a></div>`;
+  } else {
+    $("#mesebanner").innerHTML=`<div class="banner warn">${dot('#e0a800')}<strong>Costi ${mm} IN FORMAZIONE — stima incompleta</strong> (documenti del mese non ancora tutti caricati). <a href="#" onclick="consolidaMese(0);return false"><strong>Consolida prezzi del mese</strong></a></div>`;
+  }
+}
+async function consolidaMese(riapri){
+  const {a,m}=periodo(); const mm=`${a}-${String(m).padStart(2,'0')}`;
+  if(!riapri && !confirm('Confermi che TUTTI i documenti di '+mm+' sono caricati e consolidi i costi del mese?')) return;
+  await fetch('/api/consolida_mese',{method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify(riapri?{anno:a,mese:m,riapri:1}:{anno:a,mese:m})});
+  aggiornaStatoMese();
 }
 function sottoVista(v){
   SUBV=v;
@@ -1144,6 +1198,7 @@ function renderCostoDett(d){
   let h=`<div class="dbox">`;
   h+=`<p><strong>Costo efficace</strong>: ${e?eur(e.CostoEff):'—'}`
      +(e?` <span class="pill">${esc(e.Fonte)}</span> &nbsp; puro ${eur(e.PuroUnit)} + oneri ${eur(e.OneriUnit)}`:'')+`</p>`;
+  if(d.fornitore) h+=`<p style="margin-top:-6px"><strong>Fornitore preferenziale</strong>: ${esc(d.fornitore.CompanyName||d.fornitore.Supplier)}${d.fornitore.CompanyName?` <span class="muted">(${esc(d.fornitore.Supplier)})</span>`:''}</p>`;
   h+=`<h3 class="sec">Formazione del WAP mese per mese</h3>
       <table><thead><tr><th>Mese</th><th class="num">Q.tà iniz</th><th class="num">Acq. q</th><th class="num">Acq. puro</th>
       <th class="num">Acq. oneri</th><th class="num">Vend.</th><th class="num">Resi</th><th class="num">Rett./Trasf</th>

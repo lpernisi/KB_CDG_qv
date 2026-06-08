@@ -97,3 +97,21 @@ GO
 -- Esempi:
 --   SELECT Livello, COUNT(*) FROM kodice.vw_qualita_costo WHERE Anno=2026 AND Mese=4 GROUP BY Livello;
 --   SELECT * FROM kodice.vw_qualita_costo WHERE Anno=2026 AND Mese=4 AND Livello<>'VERDE' AND Stato IS NULL;
+
+-- =============================================================================
+-- costo_mese_stato — CONSOLIDAMENTO MENSILE del costo (certifica prezzi del mese).
+-- -----------------------------------------------------------------------------
+-- L'amministrazione, quando ha caricato TUTTI i documenti del mese, CONSOLIDA i prezzi:
+-- da quel momento il costo del mese e' la base solida per le vendite del mese successivo.
+-- Finche' non c'e' la riga CONSOLIDATO, il mese e' "in formazione" = stima incompleta.
+IF OBJECT_ID('kodice.costo_mese_stato', 'U') IS NULL
+CREATE TABLE kodice.costo_mese_stato (
+    Anno       smallint     NOT NULL,
+    Mese       tinyint      NOT NULL,
+    Stato      varchar(20)  NOT NULL,   -- CONSOLIDATO (assenza riga = IN_FORMAZIONE)
+    Utente     varchar(100) NULL,
+    DataStato  datetime     NULL,
+    Nota       varchar(500) NULL,
+    CONSTRAINT PK_costo_mese_stato PRIMARY KEY (Anno, Mese)
+);
+GO
