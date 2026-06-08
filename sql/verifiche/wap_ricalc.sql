@@ -7,10 +7,14 @@
 -- Per ogni (Item, Mese) dell'anno @Anno, a rotazione da Gennaio:
 --   Giacenza iniziale Gen = SUM(KLProgUbicazioni.QtaIniziale Eserc.@Anno)              [deposito ATRI, fisico]
 --                         + SUM(MA_ItemsBalances.InitialBookInv FY @Anno, Storage<>'ATRI')
---   Valore iniziale Gen   = QtaIniz * WAPCost(ultima riga MA_ItemsWAP < Gen @Anno)      [risalita Dic anno prec.]
---   Split iniziale (opz. a): ValPuroIniz = valore;  ValOneriIniz = 0  (oneri si accumulano dai carichi)
---   Carichi/oneri dai MOVIMENTI (per WAPMovementType):
---     ACQUISTI (2032533505): +Qty, +valore (puro = LineAmount non AGGDAZI/IMPORT; oneri = LineAmount AGGDAZI/IMPORT)
+--   Costo d'apertura Gen  = OVERRIDE manuale (kodice.wap_apertura_override) se presente [BONIFICA dati di partenza],
+--                           altrimenti ultimo WAPCost>0 di MA_ItemsWAP < Gen @Anno (risalita robusta: non azzera se
+--                           a fine anno prec. Mago era a 0/negativo). Valore iniziale = QtaIniz * costo d'apertura.
+--   Split iniziale: ValPuroIniz = qty*puro_unit; ValOneriIniz = qty*oneri_unit (di norma oneri apertura = 0).
+--   Carichi/oneri dai MOVIMENTI (per WAPMovementType). VALORI CONVERTITI IN EUR: LineAmount * Fixing per
+--   i movimenti in valuta estera (Fixing = cambio del movimento; EUR -> Fixing 0, nessuna conversione):
+--     ACQUISTI (2032533505): +Qty; valore spaccato per QUANTITA' (come MA_ItemsWAP): movimento CON qty = acquisto
+--                            (puro); SENZA qty = oneri/cambi spalmati (dazi/import + differenze cambio ACQ-VALD).
 --     VENDITE  (2032533506): -Qty
 --     RESI     (2032533509): +Qty (rientro al WAPCost di periodo)
 --     TRASFERIMENTI (507) / IGNORA (508) / NULL: esclusi
@@ -39,6 +43,7 @@ CREATE TABLE kodice.wap_ricalc (
     ValAcqOneri   float        NULL,
     QtaVend       float        NULL,
     QtaResi       float        NULL,
+    QtaRettTrasf  float        NULL,   -- rettifiche/trasferimenti con segno (CAR-AMA +, KLRI/RI ±, KLR-FORA −), costo-neutro
     QtaFin        float        NULL,
     ValPuroFin    float        NULL,
     ValOneriFin   float        NULL,
@@ -51,6 +56,34 @@ CREATE TABLE kodice.wap_ricalc (
 );
 GO
 
+-- aggiunta colonna se la tabella esisteva gia' (idempotente)
+IF COL_LENGTH('kodice.wap_ricalc', 'QtaRettTrasf') IS NULL
+    ALTER TABLE kodice.wap_ricalc ADD QtaRettTrasf float NULL;
+GO
+
+-- =============================================================================
+-- wap_apertura_override — BONIFICA dei DATI DI PARTENZA (apertura d'esercizio).
+-- -----------------------------------------------------------------------------
+-- L'algoritmo di ricalcolo e' affidabile: l'unico punto debole sono i dati di apertura
+-- (giacenza/costo iniziale). Per gli articoli con apertura sbagliata — tipicamente WAPCost di
+-- risalita = 0 perche' a fine anno precedente Mago era andato in quantita' NEGATIVA, oppure
+-- quantita' d'apertura errata — qui si FORZA il valore corretto. Il seed di usp_ricalc_wap usa
+-- questi valori al posto del calcolo automatico (COALESCE: override -> automatico).
+IF OBJECT_ID('kodice.wap_apertura_override', 'U') IS NULL
+CREATE TABLE kodice.wap_apertura_override (
+    Item            varchar(21)  NOT NULL,
+    Anno            smallint     NOT NULL,
+    QtaIniz         float        NULL,   -- forza la QUANTITA' d'apertura (NULL = usa quella calcolata)
+    CostoPuroUnit   float        NULL,   -- forza il costo PURO unitario d'apertura (NULL = risalita automatica su WAPCost>0)
+    CostoOneriUnit  float        NULL,   -- forza gli ONERI unitari d'apertura (NULL = 0)
+    Fonte           varchar(30)  NULL,   -- LASTCOST / RISALITA_POS / MAGO / MANUALE ...
+    Nota            varchar(500) NULL,
+    Utente          varchar(100) NULL,
+    DataStato       datetime     NULL,
+    CONSTRAINT PK_wap_apertura_override PRIMARY KEY (Item, Anno)
+);
+GO
+
 CREATE OR ALTER PROCEDURE kodice.usp_ricalc_wap
     @Anno    smallint,
     @MeseMax tinyint = 12
@@ -59,7 +92,10 @@ BEGIN
     SET NOCOUNT ON;
     DELETE FROM kodice.wap_ricalc WHERE Anno = @Anno;
 
-    -- ---- SEED: giacenza iniziale reale + WAPCost di risalita (Dic anno precedente) ----
+    -- ---- SEED: giacenza iniziale reale + costo d'apertura ----
+    -- Costo d'apertura: 1) OVERRIDE manuale (kodice.wap_apertura_override) se presente -> bonifica dati;
+    --                   2) altrimenti RISALITA su ultimo WAPCost>0 (NON l'ultima riga: se Mago era a 0/negativo
+    --                      a fine anno prec. il costo non deve azzerarsi -> regola "il costo sopravvive a giacenza 0").
     IF OBJECT_ID('tempdb..#seed') IS NOT NULL DROP TABLE #seed;
     ;WITH ubi AS (
         SELECT LTRIM(RTRIM(Articolo)) AS Item, SUM(QtaIniziale) AS q
@@ -69,12 +105,16 @@ BEGIN
         SELECT LTRIM(RTRIM(Item)) AS Item, SUM(InitialBookInv) AS q
         FROM KODICEBAGNO_4.dbo.MA_ItemsBalances WHERE FiscalYear = @Anno AND Storage <> 'ATRI' GROUP BY LTRIM(RTRIM(Item))
     ),
-    seedw AS (
+    seedw AS (   -- ultimo WAPCost>0 prima dell'anno (risalita robusta; NON azzera se l'ultima riga e' 0)
         SELECT Item, WAPCost FROM (
             SELECT LTRIM(RTRIM(Item)) AS Item, WAPCost,
                    ROW_NUMBER() OVER (PARTITION BY LTRIM(RTRIM(Item)) ORDER BY EndPeriodDate DESC) rn
-            FROM KODICEBAGNO_4.dbo.MA_ItemsWAP WHERE Storage = '' AND EndPeriodDate < DATEFROMPARTS(@Anno,1,1)
+            FROM KODICEBAGNO_4.dbo.MA_ItemsWAP WHERE Storage = '' AND WAPCost > 0 AND EndPeriodDate < DATEFROMPARTS(@Anno,1,1)
         ) t WHERE rn = 1
+    ),
+    ovr AS (
+        SELECT LTRIM(RTRIM(Item)) AS Item, QtaIniz, CostoPuroUnit, CostoOneriUnit
+        FROM kodice.wap_apertura_override WHERE Anno = @Anno
     ),
     mov AS (
         SELECT DISTINCT LTRIM(RTRIM(d.Item)) AS Item
@@ -82,15 +122,17 @@ BEGIN
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = d.EntryId
         WHERE YEAR(h.PostingDate) = @Anno
     ),
-    univ AS (SELECT Item FROM ubi UNION SELECT Item FROM baln UNION SELECT Item FROM mov UNION SELECT Item FROM seedw)
+    univ AS (SELECT Item FROM ubi UNION SELECT Item FROM baln UNION SELECT Item FROM mov UNION SELECT Item FROM seedw UNION SELECT Item FROM ovr)
     SELECT u.Item,
-           ISNULL(ubi.q,0) + ISNULL(baln.q,0) AS qty,
-           ISNULL(sw.WAPCost,0)               AS wcost
+           COALESCE(ov.QtaIniz, ISNULL(ubi.q,0) + ISNULL(baln.q,0)) AS qty,
+           COALESCE(ov.CostoPuroUnit, ISNULL(sw.WAPCost,0))         AS puro_unit,
+           COALESCE(ov.CostoOneriUnit, 0)                           AS oneri_unit
     INTO #seed
     FROM univ u
     LEFT JOIN ubi  ON ubi.Item  = u.Item
     LEFT JOIN baln ON baln.Item = u.Item
-    LEFT JOIN seedw sw ON sw.Item = u.Item;
+    LEFT JOIN seedw sw ON sw.Item = u.Item
+    LEFT JOIN ovr ov ON ov.Item = u.Item;
 
     DECLARE @m tinyint = 1;
     WHILE @m <= @MeseMax
@@ -101,18 +143,35 @@ BEGIN
         ),
         iniz AS (
             SELECT s.Item,
-                   CASE WHEN @m = 1 THEN s.qty           ELSE ISNULL(p.QtaFin,0)      END AS QtaIniz,
-                   CASE WHEN @m = 1 THEN s.qty * s.wcost ELSE ISNULL(p.ValPuroFin,0)  END AS ValPuroIniz,
-                   CASE WHEN @m = 1 THEN 0.0             ELSE ISNULL(p.ValOneriFin,0) END AS ValOneriIniz
+                   CASE WHEN @m = 1 THEN s.qty                ELSE ISNULL(p.QtaFin,0)      END AS QtaIniz,
+                   CASE WHEN @m = 1 THEN s.qty * s.puro_unit   ELSE ISNULL(p.ValPuroFin,0)  END AS ValPuroIniz,
+                   CASE WHEN @m = 1 THEN s.qty * s.oneri_unit  ELSE ISNULL(p.ValOneriFin,0) END AS ValOneriIniz
             FROM #seed s LEFT JOIN prev p ON p.Item = s.Item
         ),
         mv AS (
+            -- I valori sono convertiti in EUR: LineAmount * Fixing per i movimenti in valuta estera
+            -- (h.Fixing = cambio del movimento su MA_InventoryEntries; per EUR Fixing=0 -> nessuna conversione).
+            -- Split per QUANTITA' (come fa MA_ItemsWAP / MA_ItemsWAPTransactions): movimento acquisto CON quantita'
+            -- = costo d'acquisto (puro); SENZA quantita' = valori spalmati (oneri accessori dazi/import + differenze
+            -- cambio, es. causale ACQ-VALD). Riconciliato al centesimo col WAP di Mago.
             SELECT LTRIM(RTRIM(d.Item)) AS Item,
                    SUM(CASE WHEN h.WAPMovementType = 2032533505 THEN d.Qty ELSE 0 END) AS QtaAcq,
-                   SUM(CASE WHEN h.InvRsn IN ('AGGDAZI','IMPORT') THEN d.LineAmount ELSE 0 END) AS ValAcqOneri,
-                   SUM(CASE WHEN h.WAPMovementType = 2032533505 AND h.InvRsn NOT IN ('AGGDAZI','IMPORT') THEN d.LineAmount ELSE 0 END) AS ValAcqPuro,
+                   SUM(CASE WHEN h.WAPMovementType = 2032533505 AND d.Qty = 0
+                            THEN d.LineAmount * CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing > 0 THEN h.Fixing ELSE 1 END
+                            ELSE 0 END) AS ValAcqOneri,
+                   SUM(CASE WHEN h.WAPMovementType = 2032533505 AND d.Qty <> 0
+                            THEN d.LineAmount * CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing > 0 THEN h.Fixing ELSE 1 END
+                            ELSE 0 END) AS ValAcqPuro,
                    SUM(CASE WHEN h.WAPMovementType = 2032533506 THEN d.Qty ELSE 0 END) AS QtaVend,
-                   SUM(CASE WHEN h.WAPMovementType = 2032533509 THEN d.Qty ELSE 0 END) AS QtaResi
+                   SUM(CASE WHEN h.WAPMovementType = 2032533509 THEN d.Qty ELSE 0 END) AS QtaResi,
+                   -- RETTIFICHE/TRASFERIMENTI con SEGNO (a costo-neutro: entrano/escono al WAP del periodo).
+                   -- +: CAR-AMA (carico Amazon FBA), KLRI-P-A / RI-POS (rettifiche inventario positive).
+                   -- -: KLRI-N-A / RI-NEG (rettifiche negative), KLR-FORA (reso a fornitore, merce che esce).
+                   -- IGNORATI: KL-TRASF (spostamento ubicazione dentro ATRI), MOV-DEP (mov. tra depositi),
+                   --           KRETASS+/- (rettifiche di assegnazione). KLVEN-OA resta vendita (-, tipo 506).
+                   SUM(CASE WHEN h.InvRsn IN ('CAR-AMA','KLRI-P-A','RI-POS')  THEN d.Qty
+                            WHEN h.InvRsn IN ('KLRI-N-A','RI-NEG','KLR-FORA') THEN -d.Qty
+                            ELSE 0 END) AS QtaRettTrasf
             FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = d.EntryId
             WHERE YEAR(h.PostingDate) = @Anno AND MONTH(h.PostingDate) = @m
@@ -121,13 +180,13 @@ BEGIN
         calc AS (
             SELECT i.Item, i.QtaIniz, i.ValPuroIniz, i.ValOneriIniz,
                    ISNULL(mv.QtaAcq,0) AS QtaAcq, ISNULL(mv.ValAcqPuro,0) AS ValAcqPuro, ISNULL(mv.ValAcqOneri,0) AS ValAcqOneri,
-                   ISNULL(mv.QtaVend,0) AS QtaVend, ISNULL(mv.QtaResi,0) AS QtaResi
+                   ISNULL(mv.QtaVend,0) AS QtaVend, ISNULL(mv.QtaResi,0) AS QtaResi, ISNULL(mv.QtaRettTrasf,0) AS QtaRettTrasf
             FROM iniz i LEFT JOIN mv ON mv.Item = i.Item
         )
         INSERT INTO kodice.wap_ricalc
-            (Item,Anno,Mese,QtaIniz,ValPuroIniz,ValOneriIniz,QtaAcq,ValAcqPuro,ValAcqOneri,QtaVend,QtaResi,
+            (Item,Anno,Mese,QtaIniz,ValPuroIniz,ValOneriIniz,QtaAcq,ValAcqPuro,ValAcqOneri,QtaVend,QtaResi,QtaRettTrasf,
              QtaFin,ValPuroFin,ValOneriFin,PuroUnit,OneriUnit,WAPCost_ricalc,WAPCost_Mago,Delta)
-        SELECT c.Item, @Anno, @m, c.QtaIniz, c.ValPuroIniz, c.ValOneriIniz, c.QtaAcq, c.ValAcqPuro, c.ValAcqOneri, c.QtaVend, c.QtaResi,
+        SELECT c.Item, @Anno, @m, c.QtaIniz, c.ValPuroIniz, c.ValOneriIniz, c.QtaAcq, c.ValAcqPuro, c.ValAcqOneri, c.QtaVend, c.QtaResi, c.QtaRettTrasf,
                u.qtafin,
                u.puro_unit * u.qtafin, u.oneri_unit * u.qtafin,
                u.puro_unit, u.oneri_unit, (u.puro_unit + u.oneri_unit),
@@ -137,14 +196,14 @@ BEGIN
         CROSS APPLY (SELECT
                 CASE WHEN (c.QtaIniz + c.QtaAcq) <> 0 THEN (c.ValPuroIniz  + c.ValAcqPuro)  / (c.QtaIniz + c.QtaAcq) ELSE 0 END AS puro_unit,
                 CASE WHEN (c.QtaIniz + c.QtaAcq) <> 0 THEN (c.ValOneriIniz + c.ValAcqOneri) / (c.QtaIniz + c.QtaAcq) ELSE 0 END AS oneri_unit,
-                (c.QtaIniz + c.QtaAcq - c.QtaVend + c.QtaResi) AS qtafin) u
+                (c.QtaIniz + c.QtaAcq - c.QtaVend + c.QtaResi + c.QtaRettTrasf) AS qtafin) u
         LEFT JOIN (
             SELECT LTRIM(RTRIM(Item)) AS Item, MAX(WAPCost) AS WAPCost
             FROM KODICEBAGNO_4.dbo.MA_ItemsWAP
             WHERE Storage = '' AND YEAR(EndPeriodDate) = @Anno AND MONTH(EndPeriodDate) = @m
             GROUP BY LTRIM(RTRIM(Item))
         ) wm ON wm.Item = c.Item
-        WHERE c.QtaIniz <> 0 OR c.QtaAcq <> 0 OR c.QtaVend <> 0 OR c.QtaResi <> 0;
+        WHERE c.QtaIniz <> 0 OR c.QtaAcq <> 0 OR c.QtaVend <> 0 OR c.QtaResi <> 0 OR c.QtaRettTrasf <> 0;
 
         SET @m += 1;
     END
@@ -245,4 +304,58 @@ SELECT Item, ValuationType, Fonte,
             END AS float) AS PuroUnit
 FROM calc
 WHERE Fonte IS NOT NULL;
+GO
+
+-- =============================================================================
+-- vw_bonifica_apertura — CANDIDATI alla bonifica dell'apertura 2026.
+-- -----------------------------------------------------------------------------
+-- Confronta, per articolo con giacenza d'apertura 2026 > 0:
+--   CostoSeed     = ultimo WAPCost>0 <= Dic-2025 (cio' che il seed 2026 erediterebbe da Mago)
+--   NostroDic2025 = WAPCost del NOSTRO roll 2025 a Dicembre (richiede EXEC usp_ricalc_wap @Anno=2025)
+--   MagoDic2025   = WAPCost di Mago a Dic-2025;  LastCost = MA_ItemsBalances.LastCost
+-- Categoria A = apertura SENZA costo (CostoSeed=0, giacenza>0) -> priorita'.
+-- Categoria B = NostroDic2025 diverge > 15% dal CostoSeed -> costo da certificare (es. 74,62 vs 48,65).
+-- Override suggerito = nostro Dic-2025 (se >0) -> LastCost -> Mago. La presenza di una riga in
+-- kodice.wap_apertura_override (esposta come override gia' certificato) significa "certificato".
+CREATE OR ALTER VIEW kodice.vw_bonifica_apertura AS
+WITH ap AS (
+    SELECT Item, SUM(q) AS qty FROM (
+        SELECT LTRIM(RTRIM(Articolo)) AS Item, SUM(QtaIniziale) AS q
+        FROM KODICEBAGNO_4.dbo.KLProgUbicazioni WHERE Esercizio = 2026 GROUP BY LTRIM(RTRIM(Articolo))
+        UNION ALL
+        SELECT LTRIM(RTRIM(Item)), SUM(InitialBookInv)
+        FROM KODICEBAGNO_4.dbo.MA_ItemsBalances WHERE FiscalYear = 2026 AND Storage <> 'ATRI' GROUP BY LTRIM(RTRIM(Item))
+    ) t GROUP BY Item HAVING SUM(q) > 0
+),
+seed AS (
+    SELECT Item, WAPCost FROM (
+        SELECT LTRIM(RTRIM(Item)) AS Item, WAPCost,
+               ROW_NUMBER() OVER (PARTITION BY LTRIM(RTRIM(Item)) ORDER BY EndPeriodDate DESC) rn
+        FROM KODICEBAGNO_4.dbo.MA_ItemsWAP WHERE Storage='' AND WAPCost>0 AND EndPeriodDate < '2026-01-01') t WHERE rn=1
+),
+n25 AS (SELECT Item, WAPCost_ricalc, QtaFin FROM kodice.wap_ricalc WHERE Anno=2025 AND Mese=12),
+magoD AS (SELECT LTRIM(RTRIM(Item)) AS Item, MAX(WAPCost) AS WAPCost
+          FROM KODICEBAGNO_4.dbo.MA_ItemsWAP WHERE Storage='' AND YEAR(EndPeriodDate)=2025 AND MONTH(EndPeriodDate)=12 GROUP BY LTRIM(RTRIM(Item))),
+lc AS (SELECT LTRIM(RTRIM(Item)) AS Item, MAX(NULLIF(LastCost,0)) AS lastc
+       FROM KODICEBAGNO_4.dbo.MA_ItemsBalances WHERE FiscalYear IN (2025,2026) GROUP BY LTRIM(RTRIM(Item))),
+calc AS (
+    SELECT ap.Item, i.Description AS Descrizione, ap.qty AS Giacenza,
+           ISNULL(s.WAPCost,0) AS CostoSeed, ISNULL(n.WAPCost_ricalc,0) AS NostroDic2025,
+           ISNULL(md.WAPCost,0) AS MagoDic2025, ISNULL(lc.lastc,0) AS LastCost,
+           CASE WHEN ISNULL(s.WAPCost,0) <= 0 THEN 'A'
+                WHEN n.WAPCost_ricalc > 0 AND ABS(n.WAPCost_ricalc - s.WAPCost) > 0.15 * s.WAPCost THEN 'B'
+                ELSE NULL END AS Categoria,
+           CASE WHEN ISNULL(n.WAPCost_ricalc,0) > 0 THEN n.WAPCost_ricalc
+                WHEN ISNULL(lc.lastc,0) > 0 THEN lc.lastc
+                ELSE ISNULL(md.WAPCost,0) END AS OverrideSuggerito,
+           ov.CostoPuroUnit AS OverrideAttuale, ov.Fonte AS OverrideFonte, ov.Nota AS OverrideNota
+    FROM ap
+    LEFT JOIN seed s  ON s.Item  = ap.Item
+    LEFT JOIN n25 n   ON n.Item  = ap.Item
+    LEFT JOIN magoD md ON md.Item = ap.Item
+    LEFT JOIN lc      ON lc.Item = ap.Item
+    LEFT JOIN kodice.wap_apertura_override ov ON ov.Item = ap.Item AND ov.Anno = 2026
+    LEFT JOIN KODICEBAGNO_4.dbo.MA_Items i ON LTRIM(RTRIM(i.Item)) = ap.Item
+)
+SELECT * FROM calc WHERE Categoria IS NOT NULL OR OverrideAttuale IS NOT NULL;
 GO

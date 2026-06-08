@@ -431,6 +431,16 @@ OGGETTI_SQL = [
               "l'inventario di bilancio (src/genera_report_inventario.py): i kit con la distinta esplosa sui costi "
               "efficaci; i pochi articoli senza alcun costo SQL (imballaggi interni EPAL) col prezzo del report Mago; "
               "dove il nostro costo indipendente diverge molto dal prezzo Mago la riga e' segnalata come prezzo sospetto."},
+    {"gruppo": "7 · Qualita' del dato", "nome": "kodice.vw_qualita_costo", "tipo": "view",
+     "spieg": "INDICI DI QUALITA' del costo per (Item,Anno,Mese): calcola i flag (Q1 scostamento vs WAP Mago, "
+              "Q2 WAP Mago azzerato=informativo, Q3 oneri spariti, Q4 valuta non convertita, Q5 salto costo MoM, "
+              "Q6 acquisto a prezzo anomalo, Q9 quantita' negativa, Q11 causale non mappata), assegna un LIVELLO "
+              "ROSSO (bloccante: Q4/Q9) / GIALLO (da rivedere) / VERDE, e lo stato di certificazione. Alimenta la "
+              "tab 'Certificazione costi' (scorecard + indice qualita' = % valore magazzino VERDE o certificato)."},
+    {"gruppo": "7 · Qualita' del dato", "nome": "kodice.qualita_certificazione", "tipo": "table",
+     "spieg": "Tabella di STATO della certificazione (l'unica scrivibile dalla dashboard): per (Item,Anno,Mese) il "
+              "revisore marca CERTIFICATO / ACCETTATO_CON_NOTA / DA_CORREGGERE_ALGORITMO / IGNORATO, con nota, utente "
+              "e data. La vista vw_qualita_costo la legge per mostrare cosa e' ancora aperto."},
 ]
 
 
@@ -452,6 +462,128 @@ def _ddl_tabella(c, nome_qualificato: str) -> str:
     out.append(",\n".join(defs))
     out.append(");")
     return "\n".join(out)
+
+
+@app.get("/api/qualita")
+def api_qualita():
+    """Indici di qualita' del costo (kodice.vw_qualita_costo) per il periodo + scorecard."""
+    anno = int(request.args.get("anno"))
+    mese = int(request.args.get("mese"))
+    score = righe("SELECT Livello, COUNT(*) AS n FROM kodice.vw_qualita_costo "
+                  "WHERE Anno=:a AND Mese=:m GROUP BY Livello", a=anno, m=mese)
+    # indice sintetico = % del VALORE di magazzino (QtaFin*costo) gia' VERDE o certificato
+    val = righe("""
+        SELECT SUM(ISNULL(QtaFin,0)*ISNULL(WAPCost_ricalc,0)) AS val_tot,
+               SUM(CASE WHEN Livello='VERDE' OR Stato IN ('CERTIFICATO','ACCETTATO_CON_NOTA')
+                        THEN ISNULL(QtaFin,0)*ISNULL(WAPCost_ricalc,0) ELSE 0 END) AS val_ok
+        FROM kodice.vw_qualita_costo WHERE Anno=:a AND Mese=:m AND QtaFin>0""", a=anno, m=mese)
+    lista = righe("""
+        SELECT q.Item, i.Description AS descr, q.Livello, q.Flags,
+               q.WAPCost_ricalc, q.WAPCost_Mago, q.QtaFin, q.OneriUnit, q.Stato, q.Nota
+        FROM kodice.vw_qualita_costo q
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_Items i ON LTRIM(RTRIM(i.Item)) = q.Item
+        WHERE q.Anno=:a AND q.Mese=:m AND q.Livello <> 'VERDE'
+        ORDER BY CASE q.Livello WHEN 'ROSSO' THEN 0 ELSE 1 END, q.Item""", a=anno, m=mese)
+    return jsonify({"score": score, "valore": (val[0] if val else {}), "lista": lista})
+
+
+@app.post("/api/certifica")
+def api_certifica():
+    """Scrive lo stato di certificazione (unica scrittura della dashboard) su kodice.qualita_certificazione."""
+    d = request.get_json(force=True)
+    p = {"item": d["item"], "anno": int(d["anno"]), "mese": int(d["mese"]),
+         "stato": d["stato"], "nota": d.get("nota", ""), "utente": d.get("utente", "dashboard")}
+    if p["stato"] in ("", "DA_CERTIFICARE"):   # "riapri": elimina lo stato
+        with engine.begin() as c:
+            c.execute(text("DELETE FROM kodice.qualita_certificazione "
+                           "WHERE Item=:item AND Anno=:anno AND Mese=:mese"), p)
+        return jsonify({"ok": True, "riaperto": True})
+    with engine.begin() as c:
+        c.execute(text("""
+            MERGE kodice.qualita_certificazione AS t
+            USING (SELECT :item AS Item, :anno AS Anno, :mese AS Mese) AS s
+              ON t.Item=s.Item AND t.Anno=s.Anno AND t.Mese=s.Mese
+            WHEN MATCHED THEN UPDATE SET Stato=:stato, Nota=:nota, Utente=:utente, DataStato=SYSDATETIME()
+            WHEN NOT MATCHED THEN INSERT (Item,Anno,Mese,Stato,Nota,Utente,DataStato)
+                 VALUES (:item,:anno,:mese,:stato,:nota,:utente,SYSDATETIME());"""), p)
+    return jsonify({"ok": True})
+
+
+@app.get("/api/costo_dettaglio")
+def api_costo_dettaglio():
+    """Scheda 'come si forma il costo' di un articolo: roll mensile del WAP + movimenti (acquisti, valuta/cambio, oneri, rettifiche)."""
+    item = request.args.get("item")
+    anno = int(request.args.get("anno", 2026))
+    roll = righe("""
+        SELECT Mese, QtaIniz, ValPuroIniz, ValOneriIniz, QtaAcq, ValAcqPuro, ValAcqOneri,
+               QtaVend, QtaResi, QtaRettTrasf, QtaFin, PuroUnit, OneriUnit, WAPCost_ricalc, WAPCost_Mago
+        FROM kodice.wap_ricalc WHERE Item=:i AND Anno=:a ORDER BY Mese""", i=item, a=anno)
+    eff = righe("SELECT Fonte, CostoEff, PuroUnit, OneriUnit, ValuationType FROM kodice.vw_costo_eff WHERE Item=:i", i=item)
+    mov = righe("""
+        SELECT MONTH(h.PostingDate) AS Mese, h.InvRsn, h.WAPMovementType, h.Currency, h.Fixing,
+               SUM(d.Qty) AS qty, SUM(d.LineAmount) AS lineamt,
+               SUM(d.LineAmount * CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing > 0 THEN h.Fixing ELSE 1 END) AS eur
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = d.EntryId
+        WHERE LTRIM(RTRIM(d.Item)) = :i AND YEAR(h.PostingDate) = :a
+        GROUP BY MONTH(h.PostingDate), h.InvRsn, h.WAPMovementType, h.Currency, h.Fixing
+        ORDER BY MONTH(h.PostingDate), h.InvRsn""", i=item, a=anno)
+    return jsonify({"roll": roll, "eff": (eff[0] if eff else None), "mov": mov})
+
+
+@app.get("/api/cerca_articolo")
+def api_cerca_articolo():
+    """Ricerca articolo (codice o descrizione) per aprire la scheda costo di QUALUNQUE articolo."""
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify([])
+    like = f"%{q}%"
+    return jsonify(righe("""
+        SELECT TOP 25 LTRIM(RTRIM(Item)) AS Item, Description AS descr
+        FROM KODICEBAGNO_4.dbo.MA_Items
+        WHERE Item LIKE :like OR Description LIKE :like
+        ORDER BY Item""", like=like))
+
+
+@app.get("/api/bonifica")
+def api_bonifica():
+    """Candidati alla bonifica dell'apertura 2026 (kodice.vw_bonifica_apertura)."""
+    return jsonify(righe("""
+        SELECT Item, Descrizione, Categoria, Giacenza, CostoSeed, NostroDic2025, MagoDic2025,
+               LastCost, OverrideSuggerito, OverrideAttuale, OverrideFonte
+        FROM kodice.vw_bonifica_apertura
+        ORDER BY CASE WHEN OverrideAttuale IS NULL THEN 0 ELSE 1 END,
+                 CASE Categoria WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END, Giacenza DESC"""))
+
+
+@app.post("/api/bonifica_certifica")
+def api_bonifica_certifica():
+    """Certifica (o rimuove) il valore d'apertura forzato in kodice.wap_apertura_override (Anno 2026)."""
+    d = request.get_json(force=True)
+    item = d["item"]
+    if d.get("rimuovi"):
+        with engine.begin() as c:
+            c.execute(text("DELETE FROM kodice.wap_apertura_override WHERE Item=:i AND Anno=2026"), {"i": item})
+        return jsonify({"ok": True, "rimosso": True})
+    p = {"i": item, "c": float(d["costo"]), "f": d.get("fonte", "CERTIFICATO"),
+         "n": d.get("nota", ""), "u": d.get("utente", "dashboard")}
+    with engine.begin() as c:
+        c.execute(text("""
+            MERGE kodice.wap_apertura_override AS t
+            USING (SELECT :i AS Item, 2026 AS Anno) s ON t.Item=s.Item AND t.Anno=s.Anno
+            WHEN MATCHED THEN UPDATE SET CostoPuroUnit=:c, Fonte=:f, Nota=:n, Utente=:u, DataStato=SYSDATETIME()
+            WHEN NOT MATCHED THEN INSERT (Item,Anno,CostoPuroUnit,Fonte,Nota,Utente,DataStato)
+                 VALUES (:i,2026,:c,:f,:n,:u,SYSDATETIME());"""), p)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/rilancia_ricalcolo")
+def api_rilancia_ricalcolo():
+    """Rilancia il ricalcolo WAP per l'anno indicato (applica le aperture certificate)."""
+    anno = int((request.get_json(force=True) or {}).get("anno", 2026))
+    with engine.begin() as c:
+        c.exec_driver_sql(f"EXEC kodice.usp_ricalc_wap @Anno = {anno};")
+    return jsonify({"ok": True, "anno": anno})
 
 
 @app.get("/api/sql")
@@ -498,6 +630,7 @@ PAGINA = r"""<!DOCTYPE html>
   th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
   th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
   td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  table.sticky thead th{position:sticky;top:0;background:var(--card);box-shadow:0 1px 0 var(--line);z-index:2}
   .doc{cursor:pointer} .doc:hover{background:#efeae0}
   .doc.sel{background:var(--okbg)}
   .pill{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;background:#efeae0;color:var(--muted)}
@@ -541,6 +674,8 @@ PAGINA = r"""<!DOCTYPE html>
     <div class="tab on" data-v="doc" onclick="vista('doc')">Documenti</div>
     <div class="tab" data-v="anom" onclick="vista('anom')">Anomalie</div>
     <div class="tab" data-v="costi" onclick="vista('costi')">Costi WAP</div>
+    <div class="tab" data-v="qual" onclick="vista('qual')">Certificazione costi</div>
+    <div class="tab" data-v="bonifica" onclick="vista('bonifica')">Bonifica apertura</div>
     <div class="tab" data-v="sql" onclick="vista('sql')">Documentazione SQL</div>
   </div>
 </header>
@@ -561,6 +696,12 @@ PAGINA = r"""<!DOCTYPE html>
   <div id="v-costi" style="display:none">
     <div id="costi"><p class="muted">Carico…</p></div>
   </div>
+  <div id="v-qual" style="display:none">
+    <div id="qual"><p class="muted">Carico…</p></div>
+  </div>
+  <div id="v-bonifica" style="display:none">
+    <div id="bonifica"><p class="muted">Carico…</p></div>
+  </div>
   <div id="v-sql" style="display:none">
     <p class="muted" style="margin-top:0">Tutte le SQL del flusso, con spiegazione e <strong>definizione letta dal vivo dal database</strong> (non puo' divergere dal codice eseguito). Include il <strong>motore costi</strong> (kodice), versionato anche in <code>sql/motore/</code>.</p>
     <div id="sqlbox"><p class="muted">Carico…</p></div>
@@ -580,10 +721,13 @@ async function init(){
   sel.innerHTML=ps.map(p=>`<option value="${p.anno}-${p.mese}">${p.anno}-${String(p.mese).padStart(2,'0')} · ${eur(p.ricavo)} · MdC I ${eur(p.mdc1)}</option>`).join("");
   if(ps.length){ sel.value=`${ps[ps.length-1].anno}-${ps[ps.length-1].mese}`; }
   sel.onchange=onPeriodo; onPeriodo();
-  const h=location.hash.replace('#',''); if(h==='sql'||h==='anom'||h==='costi') vista(h);
+  const h=location.hash.replace('#',''); if(['sql','anom','costi','qual','bonifica'].includes(h)) vista(h);
 }
 function periodo(){ const [a,m]=$("#periodo").value.split("-"); return {a:+a,m:+m}; }
-function onPeriodo(){ SEL=null; cerca(); if($("#v-anom").style.display!=="none") caricaAnom(); }
+function onPeriodo(){ SEL=null; cerca();
+  if($("#v-anom").style.display!=="none") caricaAnom();
+  if($("#v-qual").style.display!=="none") caricaQual();
+}
 
 let deb;
 function cercaDeb(){ clearTimeout(deb); deb=setTimeout(cerca,250); }
@@ -655,9 +799,13 @@ function vista(v){
   $("#v-doc").style.display = v==="doc"?"":"none";
   $("#v-anom").style.display = v==="anom"?"":"none";
   $("#v-costi").style.display = v==="costi"?"":"none";
+  $("#v-qual").style.display = v==="qual"?"":"none";
+  $("#v-bonifica").style.display = v==="bonifica"?"":"none";
   $("#v-sql").style.display = v==="sql"?"":"none";
   if(v==="anom") caricaAnom();
   if(v==="costi") caricaCosti();
+  if(v==="qual") caricaQual();
+  if(v==="bonifica") caricaBonifica();
   if(v==="sql") caricaSql();
 }
 let COSTIMESI=6;
@@ -691,6 +839,183 @@ async function caricaCosti(){
   };
   h+= tabella(su,"📈 Costo in AUMENTO") + tabella(giu,"📉 Costo in CALO");
   $("#costi").innerHTML=h;
+}
+const dot=c=>`<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${c};margin-right:5px;vertical-align:middle"></span>`;
+async function caricaQual(){
+  const {a,m}=periodo();
+  const d=await j(`/api/qualita?anno=${a}&mese=${m}`);
+  const cnt=l=>{const x=d.score.find(s=>s.Livello===l);return x?x.n:0;};
+  const verde=cnt('VERDE'), giallo=cnt('GIALLO'), rosso=cnt('ROSSO');
+  const v=d.valore||{}; const idx=(v.val_tot&&v.val_tot>0)?(100*v.val_ok/v.val_tot):100;
+  let h=`<div class="cards">
+    <div class="kpi"><div class="v">${idx.toFixed(1)}%</div><div class="l">Indice qualità (valore certificato)</div></div>
+    <div class="kpi"><div class="v" style="color:#1a7f37">${num(verde)}</div><div class="l">${dot('#2f7d52')}OK (automatico)</div></div>
+    <div class="kpi"><div class="v" style="color:#b8780a">${num(giallo)}</div><div class="l">${dot('#e0a800')}Warning · da rivedere</div></div>
+    <div class="kpi bad"><div class="v">${num(rosso)}</div><div class="l">${dot('#c0392b')}Errore · bloccante</div></div></div>
+  <p class="muted">Periodo ${a}-${String(m).padStart(2,'0')}. Clicca un <strong>codice articolo</strong> per vedere come si forma il costo. <em>Q2 (WAP Mago azzerato)</em> è solo informativo: Mago è rotto e il nostro costo è quello buono.</p>`;
+  h+=`<div class="panel" style="margin-bottom:16px">
+    <h2 style="margin-bottom:8px">Scheda costo · cerca QUALUNQUE articolo (anche OK)</h2>
+    <input id="acerca" placeholder="codice o descrizione…" autocomplete="off" oninput="cercaArtDeb()" style="width:60%">
+    <div id="aris"></div><div id="ascheda" style="margin-top:8px"></div></div>`;
+  const pill=l=> l==='ROSSO'?dot('#c0392b')+'<strong style="color:#c0392b">Errore</strong>'
+                 :(l==='GIALLO'?dot('#e0a800')+'<strong style="color:#b8780a">Warning</strong>':dot('#2f7d52')+'OK');
+  h+=`<div class="panel"><table><thead><tr><th>Articolo</th><th>Descrizione</th><th>Livello</th><th>Indici attivi</th>
+      <th class="num">Nostro costo</th><th class="num">WAP Mago</th><th class="num">Q.tà</th><th>Stato / azione</th></tr></thead><tbody>`;
+  h+= d.lista.map(x=>{
+     const id=esc(x.Item);
+     const az = x.Stato
+        ? `<span class="pill ok">${esc(x.Stato)}</span> · <a href="#" onclick="cert('${id}','',0);return false" class="muted">riapri</a>`
+        : `<a href="#" onclick="cert('${id}','CERTIFICATO',0);return false">Certifica</a> · `
+          +`<a href="#" onclick="cert('${id}','DA_CORREGGERE_ALGORITMO',1);return false" style="color:var(--warn)">Segnala</a> · `
+          +`<a href="#" onclick="cert('${id}','IGNORATO',1);return false" class="muted">Ignora</a>`;
+     return `<tr><td><a href="#" onclick="costoDett('${id}',this);return false" title="come si forma il costo"><code>${id}</code></a></td>
+        <td>${esc((x.descr||'').slice(0,40))}</td>
+        <td>${pill(x.Livello)}</td><td style="font-size:12px">${esc((x.Flags||'').replace(/,/g,' · '))}</td>
+        <td class="num">${eur(x.WAPCost_ricalc)}</td><td class="num">${x.WAPCost_Mago?eur(x.WAPCost_Mago):'—'}</td>
+        <td class="num">${num(x.QtaFin)}</td><td style="font-size:12px">${az}</td></tr>`;
+  }).join("") || `<tr><td colspan="8" class="muted">Nessun caso da rivedere.</td></tr>`;
+  h+=`</tbody></table></div>`;
+  $("#qual").innerHTML=h;
+}
+async function cert(item, stato, chiediNota){
+  let nota='';
+  if(chiediNota){ const r=prompt('Nota per "'+stato+'" (facoltativa):'); if(r===null) return; nota=r; }
+  const {a,m}=periodo();
+  await fetch('/api/certifica',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({item, anno:a, mese:m, stato: stato||'DA_CERTIFICARE', nota})});
+  caricaQual();
+}
+const MESI=['','Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
+function movLabel(t,rsn){
+  if(t===2032533505) return 'Acquisto (+)';
+  if(t===2032533506) return 'Vendita (−)';
+  if(t===2032533509) return 'Reso (+)';
+  if(['CAR-AMA','KLRI-P-A','RI-POS'].includes(rsn)) return 'Rettif./Carico (+)';
+  if(['KLRI-N-A','RI-NEG','KLR-FORA'].includes(rsn)) return 'Rettif./Scarico (−)';
+  return 'Ignorato';
+}
+async function costoDett(item, el, anno){
+  const tr=el.closest('tr'), nxt=tr.nextElementSibling;
+  if(nxt && nxt.classList.contains('det')){ nxt.remove(); return; }
+  const a = anno || periodo().a;
+  const d=await j(`/api/costo_dettaglio?item=${encodeURIComponent(item)}&anno=${a}`);
+  const det=document.createElement('tr'); det.className='det';
+  const td=document.createElement('td'); td.colSpan=tr.children.length;
+  td.innerHTML=`<div class="dbox" style="font-size:12px;color:var(--muted);margin-bottom:-6px">Movimenti e roll del <strong>${a}</strong></div>`+renderCostoDett(d);
+  det.appendChild(td); tr.after(det);
+}
+async function caricaBonifica(){
+  const d=await j('/api/bonifica');
+  const a=d.filter(x=>x.Categoria==='A'), b=d.filter(x=>x.Categoria==='B'), cert=d.filter(x=>x.OverrideAttuale!=null);
+  let h=`<div class="cards">
+    <div class="kpi"><div class="v">${num(a.length)}</div><div class="l">${dot('#c0392b')}A · apertura senza costo</div></div>
+    <div class="kpi"><div class="v">${num(b.length)}</div><div class="l">${dot('#e0a800')}B · costo da certificare</div></div>
+    <div class="kpi"><div class="v" style="color:#1a7f37">${num(cert.length)}</div><div class="l">${dot('#2f7d52')}certificati</div></div>
+    <div class="kpi"><div class="v">${num(d.length-cert.length)}</div><div class="l">da certificare</div></div></div>
+  <p class="muted">Bonifica dell'apertura 2026. Clicca il <strong>codice</strong> per vedere i <strong>movimenti 2025</strong> da cui nasce il valore proposto. Modifica il valore se serve, poi <em>Certifica</em>. Infine <a href="#" onclick="rilanciaRic();return false"><strong>↻ Applica bonifica (rilancia ricalcolo 2026)</strong></a>.</p>`;
+  h+=`<div class="panel" style="padding:0"><div style="max-height:72vh;overflow:auto"><table class="sticky"><thead><tr><th>Articolo</th><th>Descrizione</th><th>Cat.</th><th class="num">Giac.</th>
+      <th class="num">Costo seed</th><th class="num">Nostro 2025</th><th class="num">Mago Dic</th><th class="num">LastCost</th>
+      <th>Valore d'apertura</th><th>Azione</th></tr></thead><tbody>`;
+  h+= d.map(x=>{
+    const id=esc(x.Item);
+    const cat = x.Categoria==='A'?dot('#c0392b')+'A':(x.Categoria==='B'?dot('#e0a800')+'B':'—');
+    const certified = x.OverrideAttuale!=null;
+    const val = certified? x.OverrideAttuale : x.OverrideSuggerito;
+    const iid='bo_'+id.replace(/[^a-zA-Z0-9]/g,'_');
+    const az = certified
+       ? `<span class="pill ok">certificato</span> · <a href="#" onclick="certifBon('${id}',0,1);return false" class="muted">rimuovi</a>`
+       : `<a href="#" onclick="certifBon('${id}',document.getElementById('${iid}').value,0);return false">Certifica</a>`;
+    return `<tr><td><a href="#" onclick="costoDett('${id}',this,2025);return false" title="movimenti 2025"><code>${id}</code></a></td>
+       <td>${esc((x.Descrizione||'').slice(0,32))}</td><td>${cat}</td>
+       <td class="num">${num(x.Giacenza)}</td>
+       <td class="num">${x.CostoSeed?eur(x.CostoSeed):'—'}</td>
+       <td class="num"><strong>${x.NostroDic2025?eur(x.NostroDic2025):'—'}</strong></td>
+       <td class="num">${x.MagoDic2025?eur(x.MagoDic2025):'—'}</td>
+       <td class="num">${x.LastCost?eur(x.LastCost):'—'}</td>
+       <td><input id="${iid}" value="${val!=null?Number(val).toFixed(2):''}" style="width:78px;text-align:right" ${certified?'disabled':''}></td>
+       <td style="font-size:12px;white-space:nowrap">${az}</td></tr>`;
+  }).join("") || `<tr><td colspan="10" class="muted">Nessun candidato.</td></tr>`;
+  h+=`</tbody></table></div></div>`;
+  $("#bonifica").innerHTML=h;
+}
+async function certifBon(item, costo, rimuovi){
+  if(!rimuovi){
+    const v=Number(String(costo).replace(',','.'));
+    if(!v || isNaN(v)){ alert('Inserisci un valore numerico valido.'); return; }
+    await fetch('/api/bonifica_certifica',{method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({item, costo:v, fonte:'CERTIFICATO'})});
+  } else {
+    await fetch('/api/bonifica_certifica',{method:'POST',headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({item, rimuovi:1})});
+  }
+  caricaBonifica();
+}
+async function rilanciaRic(){
+  if(!confirm('Rilancio il ricalcolo 2026 con le aperture certificate? (qualche secondo)')) return;
+  await fetch('/api/rilancia_ricalcolo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({anno:2026})});
+  alert('Ricalcolo 2026 completato: i costi sono aggiornati con le aperture bonificate.');
+  caricaBonifica();
+}
+let acdeb;
+function cercaArtDeb(){ clearTimeout(acdeb); acdeb=setTimeout(cercaArt,250); }
+async function cercaArt(){
+  const q=$("#acerca").value.trim();
+  if(q.length<2){ $("#aris").innerHTML=''; return; }
+  const rs=await j(`/api/cerca_articolo?q=${encodeURIComponent(q)}`);
+  $("#aris").innerHTML = rs.map(r=>`<div class="doc" style="padding:4px 6px" onclick="mostraScheda('${esc(r.Item)}')">
+      <code>${esc(r.Item)}</code> <span class="muted">${esc((r.descr||'').slice(0,64))}</span></div>`).join("")
+    || `<div class="muted" style="padding:4px 6px">Nessun articolo.</div>`;
+}
+async function mostraScheda(item){
+  $("#aris").innerHTML=''; $("#acerca").value=item;
+  $("#ascheda").innerHTML='<p class="muted">Carico…</p>';
+  const {a}=periodo();
+  const d=await j(`/api/costo_dettaglio?item=${encodeURIComponent(item)}&anno=${a}`);
+  $("#ascheda").innerHTML='<p style="margin:6px 0"><strong>Articolo</strong> <code>'+esc(item)+'</code></p>'+renderCostoDett(d);
+}
+function renderCostoDett(d){
+  const e=d.eff;
+  let h=`<div class="dbox">`;
+  h+=`<p><strong>Costo efficace</strong>: ${e?eur(e.CostoEff):'—'}`
+     +(e?` <span class="pill">${esc(e.Fonte)}</span> &nbsp; puro ${eur(e.PuroUnit)} + oneri ${eur(e.OneriUnit)}`:'')+`</p>`;
+  h+=`<h3 class="sec">Formazione del WAP mese per mese</h3>
+      <table><thead><tr><th>Mese</th><th class="num">Q.tà iniz</th><th class="num">Acq. q</th><th class="num">Acq. puro</th>
+      <th class="num">Acq. oneri</th><th class="num">Vend.</th><th class="num">Resi</th><th class="num">Rett./Trasf</th>
+      <th class="num">Q.tà fin</th><th class="num">Costo puro</th><th class="num">Costo oneri</th><th class="num">WAP nostro</th><th class="num">WAP Mago</th></tr></thead><tbody>`;
+  h+= d.roll.map(r=>`<tr><td>${MESI[r.Mese]}</td>
+      <td class="num">${num(r.QtaIniz)}</td>
+      <td class="num">${r.QtaAcq?num(r.QtaAcq):''}</td>
+      <td class="num">${r.ValAcqPuro?eur(r.ValAcqPuro):''}</td>
+      <td class="num">${r.ValAcqOneri?eur(r.ValAcqOneri):''}</td>
+      <td class="num">${r.QtaVend?'−'+num(r.QtaVend):''}</td>
+      <td class="num">${r.QtaResi?'+'+num(r.QtaResi):''}</td>
+      <td class="num">${r.QtaRettTrasf?(Number(r.QtaRettTrasf)>0?'+':'')+num(r.QtaRettTrasf):''}</td>
+      <td class="num ${Number(r.QtaFin)<0?'neg':''}">${num(r.QtaFin)}</td>
+      <td class="num">${eur(r.PuroUnit)}</td>
+      <td class="num">${eur(r.OneriUnit)}</td>
+      <td class="num"><strong>${eur(r.WAPCost_ricalc)}</strong></td>
+      <td class="num muted">${r.WAPCost_Mago?eur(r.WAPCost_Mago):'—'}</td></tr>`).join("");
+  h+=`</tbody></table>`;
+  h+=`<h3 class="sec">Movimenti dell'anno — <span style="color:var(--ok)">★ = determinano il costo</span> (apertura + acquisti/oneri/cambi)</h3>`;
+  h+=`<table><thead><tr><th>Mese</th><th>Causale</th><th>Trattamento</th><th class="num">Valuta</th><th class="num">Cambio</th>
+      <th class="num">Q.tà</th><th class="num">Importo doc</th><th class="num">Importo €</th></tr></thead><tbody>`;
+  const op=(d.roll||[]).find(r=>r.Mese===1) || (d.roll||[])[0];
+  if(op){
+    h+=`<tr style="font-weight:600;background:#eef3ee"><td>${MESI[op.Mese]||'—'}</td><td>★ APERTURA</td>
+        <td>Valori inizio periodo</td><td class="num">—</td><td class="num">—</td>
+        <td class="num">${num(op.QtaIniz)}</td><td class="num">—</td>
+        <td class="num">${eur((op.ValPuroIniz||0)+(op.ValOneriIniz||0))}</td></tr>`;
+  }
+  h+= (d.mov||[]).map(mo=>{ const det = mo.WAPMovementType===2032533505;
+      return `<tr${det?' style="font-weight:600;background:#eef3ee"':''}><td>${det?'★ ':''}${MESI[mo.Mese]}</td>
+        <td><code>${esc(mo.InvRsn)}</code></td><td>${movLabel(mo.WAPMovementType,mo.InvRsn)}</td>
+        <td class="num">${esc((mo.Currency||'').trim()||'EUR')}</td>
+        <td class="num">${mo.Fixing?Number(mo.Fixing).toFixed(5):''}</td>
+        <td class="num">${num(mo.qty)}</td><td class="num">${eur(mo.lineamt)}</td><td class="num">${eur(mo.eur)}</td></tr>`;
+  }).join("");
+  if(!op && !(d.mov||[]).length) h+=`<tr><td colspan="8" class="muted">Nessun dato nell'anno.</td></tr>`;
+  h+=`</tbody></table>`;
+  return h+`</div>`;
 }
 const esc=s=>(s==null?"":String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"));
 let SQLLOADED=false;

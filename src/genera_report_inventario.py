@@ -19,7 +19,7 @@ from src import db
 
 REPORT_TXT = sys.argv[1] if len(sys.argv) > 1 else \
     r"C:\Users\mago.admin\Downloads\Magazzino a valori 2026-06-04 SENZA WAP maggio.txt"
-OUT_XLSX = r"C:\Users\mago.admin\Downloads\Inventario bilancio - confronto report vs nostro calcolo.xlsx"
+OUT_XLSX = r"C:\Users\mago.admin\Downloads\Inventario bilancio - confronto report vs nostro calcolo (FX corretto).xlsx"
 
 
 def itnum(s):
