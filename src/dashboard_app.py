@@ -717,6 +717,44 @@ def api_ce():
     return jsonify({"dim": dim, "righe": rows})
 
 
+@app.get("/api/raffronto_costo")
+def api_raffronto_costo():
+    """Raffronto del COSTO MATERIALE del mese, per articolo: nostro vs WAP Mago (risalita) vs
+    'mensile Mago' (costomaterialemensile di KB_SaleDocDetailDatiAggiuntivi, quello usato da Qlik).
+    Serve a capire DOVE nasce la differenza di totale tra il nostro CE e quello Qlik."""
+    a = int(request.args.get("anno")); m = int(request.args.get("mese"))
+    rows = righe("""
+        WITH wap AS (
+            SELECT Item, WAPCost FROM (
+                SELECT LTRIM(RTRIM(Item)) AS Item, WAPCost,
+                       ROW_NUMBER() OVER (PARTITION BY LTRIM(RTRIM(Item)) ORDER BY EndPeriodDate DESC) rn
+                FROM KODICEBAGNO_4.dbo.MA_ItemsWAP
+                WHERE Storage='' AND WAPCost>0 AND EndPeriodDate < DATEADD(MONTH,1,DATEFROMPARTS(:a,:m,1))
+            ) t WHERE rn=1
+        ),
+        r AS (
+            SELECT f.codice_articolo AS Item, f.quantita AS qta, (f.ricavo_netto - f.mdc1) AS mat_nostro,
+                   ISNULL(da.costomaterialemensile,0) * CASE WHEN f.quantita < 0 THEN -1 ELSE 1 END AS mat_mago
+            FROM core.fatto_riga f
+            LEFT JOIN KODICEBAGNO_4.dbo.KB_SaleDocDetailDatiAggiuntivi da
+                   ON da.SaleDocId = f.sale_doc_id AND da.Line = f.line
+            WHERE f.anno = :a AND f.mese = :m
+        )
+        SELECT r.Item, i.Description AS descr,
+               SUM(r.qta)                       AS qta,
+               SUM(r.mat_nostro)                AS mat_nostro,
+               SUM(r.qta) * MAX(w.WAPCost)      AS mat_wap,
+               SUM(r.mat_mago)                  AS mat_mago,
+               MAX(w.WAPCost)                   AS wap_unit
+        FROM r
+        LEFT JOIN wap w ON w.Item = r.Item
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_Items i ON LTRIM(RTRIM(i.Item)) = r.Item
+        GROUP BY r.Item, i.Description
+        ORDER BY ABS(SUM(r.mat_nostro) - SUM(r.mat_mago)) DESC
+    """, a=a, m=m)
+    return jsonify({"righe": rows})
+
+
 @app.get("/api/sql")
 def api_sql():
     res = []
@@ -864,10 +902,12 @@ PAGINA = r"""<!DOCTYPE html>
         <div class="subtab on" data-sv="qual" onclick="sottoVista('qual')">Certificazione qualità</div>
         <div class="subtab" data-sv="bonifica" onclick="sottoVista('bonifica')">Bonifica apertura</div>
         <div class="subtab" data-sv="trend" onclick="sottoVista('trend')">Trend del costo</div>
+        <div class="subtab" data-sv="raffronto" onclick="sottoVista('raffronto')">Raffronto vs Mago</div>
       </div>
       <div id="v-qual"><div id="qual"><p class="muted">Carico…</p></div></div>
       <div id="v-bonifica" style="display:none"><div id="bonifica"><p class="muted">Carico…</p></div></div>
       <div id="v-trend" style="display:none"><div id="trend"><p class="muted">Carico…</p></div></div>
+      <div id="v-raffronto" style="display:none"><div id="raffronto"><p class="muted">Carico…</p></div></div>
     </section>
 
     <section id="sec-wap" class="sez-main" style="display:none">
@@ -986,8 +1026,36 @@ async function consolidaMese(riapri){
 function sottoVista(v){
   SUBV=v;
   document.querySelectorAll('#sec-materiali .subtab').forEach(e=>e.classList.toggle('on',e.dataset.sv===v));
-  ['qual','bonifica','trend'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
-  if(v==='qual') caricaQual(); else if(v==='bonifica') caricaBonifica(); else if(v==='trend') caricaTrend();
+  ['qual','bonifica','trend','raffronto'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
+  if(v==='qual') caricaQual(); else if(v==='bonifica') caricaBonifica();
+  else if(v==='trend') caricaTrend(); else if(v==='raffronto') caricaRaffronto();
+}
+async function caricaRaffronto(){
+  const {a,m}=periodo();
+  const d=await j(`/api/raffronto_costo?anno=${a}&mese=${m}`);
+  const R=d.righe||[];
+  const tot=R.reduce((s,r)=>({n:s.n+Number(r.mat_nostro||0),w:s.w+Number(r.mat_wap||0),mg:s.mg+Number(r.mat_mago||0)}),{n:0,w:0,mg:0});
+  let h=`<div class="cards">
+    <div class="kpi"><div class="v">${eur(tot.n)}</div><div class="l">Materiale NOSTRO</div></div>
+    <div class="kpi"><div class="v">${eur(tot.mg)}</div><div class="l">Materiale "mensile Mago" (Qlik)</div></div>
+    <div class="kpi ${Math.abs(tot.n-tot.mg)>1?'bad':''}"><div class="v">${(tot.n-tot.mg>=0?'+':'')+eur(tot.n-tot.mg)}</div><div class="l">Δ nostro − Qlik</div></div>
+    <div class="kpi"><div class="v">${eur(tot.w)}</div><div class="l">Materiale a WAP Mago</div></div></div>
+  <p class="muted">Periodo ${a}-${String(m).padStart(2,'0')}. Confronto del costo del venduto per articolo: <strong>nostro</strong> (ricalcolo) vs <strong>WAP</strong> Mago (risalita) vs <strong>"mensile Mago"</strong> (<code>costomaterialemensile</code>, quello che alimenta il CE Qlik). Ordinato per impatto del Δ nostro−Qlik. Il totale Δ spiega lo scostamento di Materiale tra i due CE.</p>`;
+  const ucost=(mat,q)=> q?mat/q:null;
+  h+=`<div class="panel" style="padding:0"><div style="max-height:62vh;overflow:auto"><table class="sticky"><thead><tr>
+    <th>Articolo</th><th>Descrizione</th><th class="num">Q.tà</th>
+    <th class="num">C.unit nostro</th><th class="num">C.unit WAP</th><th class="num">C.unit Mago-mens.</th>
+    <th class="num">Mat. nostro</th><th class="num">Mat. WAP</th><th class="num">Mat. Qlik</th><th class="num">Δ nostro−Qlik</th></tr></thead><tbody>`;
+  h+=R.slice(0,400).map(r=>{ const dl=Number(r.mat_nostro||0)-Number(r.mat_mago||0);
+    return `<tr><td><a href="#" onclick="costoDett('${esc(r.Item)}',this);return false"><code>${esc(r.Item)}</code></a></td>
+      <td>${esc((r.descr||'').slice(0,38))}</td><td class="num">${num(r.qta)}</td>
+      <td class="num">${eur(ucost(r.mat_nostro,r.qta))}</td><td class="num">${r.wap_unit!=null?eur(r.wap_unit):'—'}</td>
+      <td class="num">${eur(ucost(r.mat_mago,r.qta))}</td>
+      <td class="num">${eur(r.mat_nostro)}</td><td class="num">${r.mat_wap!=null?eur(r.mat_wap):'—'}</td><td class="num">${eur(r.mat_mago)}</td>
+      <td class="num" style="font-weight:600;color:${Math.abs(dl)<0.5?'inherit':(dl>0?'var(--bad)':'#1a7f37')}">${(dl>=0?'+':'')+eur(dl)}</td></tr>`;
+  }).join("") || `<tr><td colspan="10" class="muted">Nessun dato.</td></tr>`;
+  h+=`</tbody></table></div></div>`;
+  $("#raffronto").innerHTML=h;
 }
 function caricaSub(){ sottoVista(SUBV); }
 function sottoWap(v){
@@ -996,11 +1064,12 @@ function sottoWap(v){
   ['costi','anom'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
   if(v==='costi') caricaCosti(); else if(v==='anom') caricaAnom();
 }
-let CEDIM='canale';
+let CEDIM='canale', CEANNO=true;
 function setCeDim(d){ CEDIM=d; caricaCE(); }
+function setCeAnno(v){ CEANNO=v; caricaCE(); }
 async function caricaCE(){
-  const {a,m}=periodo();
-  const d=await j(`/api/ce?anno=${a}&mese=${m}&dim=${CEDIM}`);
+  const {a,m}=periodo(); const mm=String(m).padStart(2,'0');
+  const d=await j(`/api/ce?anno=${a}${CEANNO?'':'&mese='+m}&dim=${CEDIM}`);
   const tot=d.righe.reduce((s,r)=>({f:s.f+Number(r.fatturato||0),ma:s.ma+Number(r.materiale||0),mg:s.mg+Number(r.margine||0)}),{f:0,ma:0,mg:0});
   const pct=v=>tot.f?(100*v/tot.f).toFixed(1)+'%':'0%';
   const dims=[['canale','Canale'],['dipartimento','Dipartimento'],['cliente','Cliente'],['agente','Agente'],['tipo_articolo','Tipo Articolo'],['linea_articolo','Linea Articolo'],['mese','Mese']];
@@ -1010,21 +1079,25 @@ async function caricaCE(){
     <div class="kpi"><div class="v">${eur(tot.ma)}</div><div class="l">Materiale (nostro costo)</div></div>
     <div class="kpi"><div class="v">${eur(tot.mg)}</div><div class="l">Margine</div></div>
     <div class="kpi"><div class="v">${pct(tot.mg)}</div><div class="l">% Margine</div></div></div>
-  <p class="muted">Periodo ${a}-${String(m).padStart(2,'0')}. Dimensione: `
+  <p class="muted">Periodo: `
+    + `<a href="#" onclick="setCeAnno(false);return false" style="margin:0 4px;${!CEANNO?'font-weight:700;text-decoration:underline':''}">Mese ${a}-${mm}</a>·`
+    + `<a href="#" onclick="setCeAnno(true);return false" style="margin:0 4px;${CEANNO?'font-weight:700;text-decoration:underline':''}">Anno intero ${a}</a>`
+    + ` &nbsp;|&nbsp; Dimensione: `
     + dims.map(x=>`<a href="#" onclick="setCeDim('${x[0]}');return false" style="margin:0 4px;${CEDIM===x[0]?'font-weight:700;text-decoration:underline':''}">${x[1]}</a>`).join('·')
     + `. <em>Materiale</em> = nostro costo certificato (ricalcolo WAP). Imballi/Trasporto/Commerciali/Finanziari in costruzione (verranno dalle stesse fonti del CE Qlik).</p>`;
   h+=`<div class="panel" style="padding:0"><div style="max-height:62vh;overflow:auto"><table class="sticky"><thead><tr>
-    <th>${etich}</th><th class="num">Fatturato</th><th class="num">Materiale</th><th class="num">Imballi</th>
+    <th>${etich}</th><th class="num">Fatturato</th><th class="num">Materiale</th><th class="num">% Mat</th><th class="num">Imballi</th>
     <th class="num">Trasporto</th><th class="num">Commerciali</th><th class="num">Finanziari</th>
     <th class="num">Margine</th><th class="num">% Margine</th><th class="num">Nr. Ordini</th></tr></thead><tbody>`;
   h+=`<tr style="font-weight:700;background:#efeae0"><td>Totali</td><td class="num">${eur(tot.f)}</td><td class="num">${eur(tot.ma)}</td>
-    <td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>
+    <td class="num">${pct(tot.ma)}</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>
     <td class="num">${eur(tot.mg)}</td><td class="num">${pct(tot.mg)}</td><td class="num"></td></tr>`;
   h+=d.righe.map(r=>`<tr><td>${esc(r.dim||'(n/d)')}</td>
     <td class="num">${eur(r.fatturato)}</td><td class="num">${eur(r.materiale)}</td>
+    <td class="num">${r.fatturato?(100*Number(r.materiale)/Number(r.fatturato)).toFixed(1):'0'}%</td>
     <td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>
     <td class="num">${eur(r.margine)}</td><td class="num">${r.fatturato?(100*Number(r.margine)/Number(r.fatturato)).toFixed(1):'0'}%</td>
-    <td class="num">${num(r.n_ordini)}</td></tr>`).join("") || `<tr><td colspan="10" class="muted">Nessun dato.</td></tr>`;
+    <td class="num">${num(r.n_ordini)}</td></tr>`).join("") || `<tr><td colspan="11" class="muted">Nessun dato.</td></tr>`;
   h+=`</tbody></table></div></div>`;
   $("#ce").innerHTML=h;
 }
