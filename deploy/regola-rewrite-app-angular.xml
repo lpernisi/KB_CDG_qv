@@ -1,0 +1,25 @@
+<!--
+  Da inserire nel web.config del SITO ANGULAR ESISTENTE (sull'altro server IIS), dentro
+  <system.webServer><rewrite><rules> ... </rules></rewrite></system.webServer>.
+  IMPORTANTISSIMO: queste due regole vanno PRIMA della regola di fallback SPA che reindirizza
+  tutto a index.html, altrimenti l'SPA "mangia" il percorso. Hanno stopProcessing="true".
+
+  Risultato: i colleghi aprono  https://<tuo-sito-angular>/tools/cdg/  e vedono il tool,
+  servito in reverse-proxy dal backend su VM2MAGO (10.8.0.2:8765) via WireGuard.
+  Cambia "tools/cdg" col percorso che preferisci (deve combaciare col prefisso usato dall'app:
+  lo shim JS antepone automaticamente il percorso corrente alle chiamate /api/...).
+
+  Prerequisiti su questo server IIS: moduli URL Rewrite + Application Request Routing,
+  e ARR proxy abilitato (server -> Application Request Routing Cache -> Server Proxy Settings -> Enable proxy).
+-->
+<rule name="CDG redirect alla slash" stopProcessing="true">
+  <match url="^tools/cdg$" />
+  <action type="Redirect" url="tools/cdg/" redirectType="Permanent" />
+</rule>
+<rule name="CDG proxy via VPN" stopProcessing="true">
+  <match url="^tools/cdg/(.*)" />
+  <action type="Rewrite" url="http://10.8.0.2:8765/{R:1}" />
+  <serverVariables>
+    <set name="HTTP_X_FORWARDED_PROTO" value="https" />
+  </serverVariables>
+</rule>
