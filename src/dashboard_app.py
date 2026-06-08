@@ -37,6 +37,13 @@ from src import db
 cfg = carica_config()
 engine = db._engine(cfg, cfg["database"]["dwh"])   # CDG_QV
 app = Flask(__name__)
+# Dietro reverse-proxy (IIS/ARR): onora gli header X-Forwarded-* (host/proto/prefisso),
+# cosi' l'app genera URL corretti quando e' pubblicata sotto un sito/percorso IIS.
+try:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+except Exception:
+    pass
 
 
 def righe(sql: str, **params):
@@ -622,6 +629,17 @@ PAGINA = r"""<!DOCTYPE html>
   .tab{padding:7px 14px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer;font-size:14px}
   .tab.on{background:var(--accent);color:#fff;border-color:transparent}
   main{max-width:1200px;margin:0 auto;padding:20px 24px 60px}
+  .app{display:flex;align-items:flex-start}
+  .side{width:210px;flex:0 0 210px;border-right:1px solid var(--line);background:var(--card);padding:8px;min-height:calc(100vh - 66px)}
+  .side .navg{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:12px 8px 4px}
+  .side .sec{padding:8px 10px;border-radius:8px;cursor:pointer;font-size:13.5px;margin-bottom:2px}
+  .side .sec:hover{background:#efeae0}
+  .side .sec.on{background:var(--accent);color:#fff}
+  .side .sec.todo{color:var(--muted)}
+  .content{flex:1;min-width:0;max-width:1180px;padding:16px 24px 60px}
+  .subtabs{display:flex;gap:6px;margin:0 0 16px;flex-wrap:wrap}
+  .subtab{padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer;font-size:13px}
+  .subtab.on{background:var(--accent);color:#fff;border-color:transparent}
   .row{display:grid;grid-template-columns:380px 1fr;gap:20px}
   @media(max-width:900px){.row{grid-template-columns:1fr}}
   .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
@@ -670,48 +688,81 @@ PAGINA = r"""<!DOCTYPE html>
 <header>
   <h1>CDG_QV · Esplora</h1>
   <label>Periodo <select id="periodo"></select></label>
-  <div class="tabs">
-    <div class="tab on" data-v="doc" onclick="vista('doc')">Documenti</div>
-    <div class="tab" data-v="anom" onclick="vista('anom')">Anomalie</div>
-    <div class="tab" data-v="costi" onclick="vista('costi')">Costi WAP</div>
-    <div class="tab" data-v="qual" onclick="vista('qual')">Certificazione costi</div>
-    <div class="tab" data-v="bonifica" onclick="vista('bonifica')">Bonifica apertura</div>
-    <div class="tab" data-v="sql" onclick="vista('sql')">Documentazione SQL</div>
-  </div>
 </header>
-<main>
-  <div id="v-doc">
-    <div class="row">
-      <div class="panel">
-        <h2>Documenti</h2>
-        <input id="q" placeholder="cerca per n° documento o cliente…" style="width:100%;margin-bottom:10px" oninput="cercaDeb()">
-        <div class="lista"><table><thead><tr><th>Doc</th><th>Cliente</th><th class="num">Ricavo</th><th></th></tr></thead><tbody id="docs"></tbody></table></div>
+<div class="app">
+  <nav class="side">
+    <div class="navg">Conto economico</div>
+    <div class="sec" data-s="ce" onclick="sezione('ce')">Riepilogo CE</div>
+    <div class="sec on" data-s="ricavi" onclick="sezione('ricavi')">Ricavi</div>
+    <div class="sec" data-s="materiali" onclick="sezione('materiali')">Costo dei materiali</div>
+    <div class="sec todo" data-s="commerciali" onclick="sezione('commerciali')">Costi commerciali</div>
+    <div class="sec todo" data-s="trasporti" onclick="sezione('trasporti')">Costi di trasporto</div>
+    <div class="sec todo" data-s="imballi" onclick="sezione('imballi')">Imballi</div>
+    <div class="sec todo" data-s="finanziari" onclick="sezione('finanziari')">Costi finanziari</div>
+    <div class="sec todo" data-s="resi" onclick="sezione('resi')">Resi da clienti</div>
+    <div class="sec todo" data-s="recuperi" onclick="sezione('recuperi')">Recuperi forn./trasp.</div>
+    <div class="navg">Strumenti</div>
+    <div class="sec" data-s="sql" onclick="sezione('sql')">Documentazione SQL</div>
+  </nav>
+  <div class="content">
+    <section id="sec-ce" class="sez-main" style="display:none">
+      <h2 class="grp">Conto economico · riepilogo</h2>
+      <div id="ce"><p class="muted">Carico…</p></div>
+    </section>
+
+    <section id="sec-ricavi" class="sez-main">
+      <h2 class="grp">Ricavi · documenti di vendita (Mago)</h2>
+      <div id="v-doc">
+        <div class="row">
+          <div class="panel">
+            <h2>Documenti</h2>
+            <input id="q" placeholder="cerca per n° documento o cliente…" style="width:100%;margin-bottom:10px" oninput="cercaDeb()">
+            <div class="lista"><table><thead><tr><th>Doc</th><th>Cliente</th><th class="num">Ricavo</th><th></th></tr></thead><tbody id="docs"></tbody></table></div>
+          </div>
+          <div class="panel"><h2>Dettaglio documento</h2><div id="dett"><p class="muted">Scegli un documento a sinistra.</p></div></div>
+        </div>
       </div>
-      <div class="panel"><h2>Dettaglio documento</h2><div id="dett"><p class="muted">Scegli un documento a sinistra.</p></div></div>
-    </div>
+    </section>
+
+    <section id="sec-materiali" class="sez-main" style="display:none">
+      <h2 class="grp">Costo dei materiali</h2>
+      <div class="subtabs">
+        <div class="subtab on" data-sv="anom" onclick="sottoVista('anom')">Anomalie</div>
+        <div class="subtab" data-sv="costi" onclick="sottoVista('costi')">Costi · raffronto Mago</div>
+        <div class="subtab" data-sv="qual" onclick="sottoVista('qual')">Certificazione qualità</div>
+        <div class="subtab" data-sv="bonifica" onclick="sottoVista('bonifica')">Bonifica apertura</div>
+      </div>
+      <div id="v-anom"><div id="anom"><p class="muted">Carico…</p></div></div>
+      <div id="v-costi" style="display:none"><div id="costi"><p class="muted">Carico…</p></div></div>
+      <div id="v-qual" style="display:none"><div id="qual"><p class="muted">Carico…</p></div></div>
+      <div id="v-bonifica" style="display:none"><div id="bonifica"><p class="muted">Carico…</p></div></div>
+    </section>
+
+    <section id="sec-commerciali" class="sez-main" style="display:none"><h2 class="grp">Costi commerciali</h2>
+      <div class="panel"><p class="muted">🔧 In costruzione — provvigioni e costi variabili di vendita (MdC II): estrazione, attribuzione alla riga, certificazione.</p></div></section>
+    <section id="sec-trasporti" class="sez-main" style="display:none"><h2 class="grp">Costi di trasporto</h2>
+      <div class="panel"><p class="muted">🔧 In costruzione — costi di trasporto (MdC III). Funzione dedicata: <strong>gestione fatture vettori</strong> (DB <code>trasporti</code>, <code>KB_FattureVettori…</code>) con <strong>riconciliazione</strong> spedizioni/fatture.</p></div></section>
+    <section id="sec-imballi" class="sez-main" style="display:none"><h2 class="grp">Imballi</h2>
+      <div class="panel"><p class="muted">🔧 In costruzione — costi di imballaggio attribuibili.</p></div></section>
+    <section id="sec-finanziari" class="sez-main" style="display:none"><h2 class="grp">Costi finanziari</h2>
+      <div class="panel"><p class="muted">🔧 In costruzione — oneri finanziari.</p></div></section>
+    <section id="sec-resi" class="sez-main" style="display:none"><h2 class="grp">Resi da clienti</h2>
+      <div class="panel"><p class="muted">🔧 In costruzione — gestione e impatto dei resi da cliente.</p></div></section>
+    <section id="sec-recuperi" class="sez-main" style="display:none"><h2 class="grp">Recuperi su fornitori/trasportatori</h2>
+      <div class="panel"><p class="muted">🔧 In costruzione — ciò che si ribalta su fornitori/vettori per i reclami dei clienti.</p></div></section>
+
+    <section id="sec-sql" class="sez-main" style="display:none">
+      <h2 class="grp">Documentazione SQL</h2>
+      <p class="muted" style="margin-top:0">Tutte le SQL del flusso, con spiegazione e <strong>definizione letta dal vivo dal database</strong> (non puo' divergere dal codice eseguito). Include il <strong>motore costi</strong> (kodice), versionato anche in <code>sql/motore/</code>.</p>
+      <div id="sqlbox"><p class="muted">Carico…</p></div>
+    </section>
   </div>
-  <div id="v-anom" style="display:none">
-    <div id="anom"><p class="muted">Carico…</p></div>
-  </div>
-  <div id="v-costi" style="display:none">
-    <div id="costi"><p class="muted">Carico…</p></div>
-  </div>
-  <div id="v-qual" style="display:none">
-    <div id="qual"><p class="muted">Carico…</p></div>
-  </div>
-  <div id="v-bonifica" style="display:none">
-    <div id="bonifica"><p class="muted">Carico…</p></div>
-  </div>
-  <div id="v-sql" style="display:none">
-    <p class="muted" style="margin-top:0">Tutte le SQL del flusso, con spiegazione e <strong>definizione letta dal vivo dal database</strong> (non puo' divergere dal codice eseguito). Include il <strong>motore costi</strong> (kodice), versionato anche in <code>sql/motore/</code>.</p>
-    <div id="sqlbox"><p class="muted">Carico…</p></div>
-  </div>
-</main>
+</div>
 <script>
 const $=s=>document.querySelector(s);
 const eur=x=>(x==null?"—":Number(x).toLocaleString("it-IT",{minimumFractionDigits:2,maximumFractionDigits:2})+" €");
 const num=x=>(x==null?"—":Number(x).toLocaleString("it-IT"));
-let PER=null, SEL=null;
+let PER=null, SEL=null, PERIODI=[], SEZ='ricavi', SUBV='anom';
 
 async function j(u){ const r=await fetch(u); return r.json(); }
 
@@ -720,13 +771,44 @@ async function init(){
   const sel=$("#periodo");
   sel.innerHTML=ps.map(p=>`<option value="${p.anno}-${p.mese}">${p.anno}-${String(p.mese).padStart(2,'0')} · ${eur(p.ricavo)} · MdC I ${eur(p.mdc1)}</option>`).join("");
   if(ps.length){ sel.value=`${ps[ps.length-1].anno}-${ps[ps.length-1].mese}`; }
-  sel.onchange=onPeriodo; onPeriodo();
-  const h=location.hash.replace('#',''); if(['sql','anom','costi','qual','bonifica'].includes(h)) vista(h);
+  PERIODI=ps; sel.onchange=onPeriodo;
+  const h=location.hash.replace('#','');
+  if(['anom','costi','qual','bonifica'].includes(h)){ SUBV=h; sezione('materiali'); }
+  else if(['ce','ricavi','materiali','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
+  else sezione('ricavi');
 }
 function periodo(){ const [a,m]=$("#periodo").value.split("-"); return {a:+a,m:+m}; }
 function onPeriodo(){ SEL=null; cerca();
-  if($("#v-anom").style.display!=="none") caricaAnom();
-  if($("#v-qual").style.display!=="none") caricaQual();
+  if(SEZ==='ce') caricaCE();
+  if(SEZ==='materiali') caricaSub();
+}
+function sezione(s){
+  SEZ=s; location.hash=s;
+  document.querySelectorAll('.side .sec').forEach(e=>e.classList.toggle('on',e.dataset.s===s));
+  document.querySelectorAll('.sez-main').forEach(e=>e.style.display=(e.id==='sec-'+s)?'':'none');
+  if(s==='ce') caricaCE();
+  else if(s==='ricavi') cerca();
+  else if(s==='materiali') sottoVista(SUBV);
+  else if(s==='sql') caricaSql();
+}
+function sottoVista(v){
+  SUBV=v;
+  document.querySelectorAll('#sec-materiali .subtab').forEach(e=>e.classList.toggle('on',e.dataset.sv===v));
+  ['anom','costi','qual','bonifica'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
+  caricaSub();
+}
+function caricaSub(){
+  if(SUBV==='anom') caricaAnom(); else if(SUBV==='costi') caricaCosti();
+  else if(SUBV==='qual') caricaQual(); else if(SUBV==='bonifica') caricaBonifica();
+}
+async function caricaCE(){
+  const {a,m}=periodo();
+  const p=(PERIODI||[]).find(x=>x.anno===a && x.mese===m)||{};
+  $("#ce").innerHTML=`<div class="cards">
+    <div class="kpi"><div class="v">${eur(p.ricavo)}</div><div class="l">Ricavo netto</div></div>
+    <div class="kpi"><div class="v">${eur(p.mdc1)}</div><div class="l">MdC I (ricavo − costo materiali)</div></div>
+  </div>
+  <p class="muted">Riepilogo del periodo ${a}-${String(m).padStart(2,'0')}. MdC II/III si popoleranno man mano che attiviamo le sezioni (commerciali, trasporti, imballi…). Dalle sezioni a sinistra verifichi e certifichi ogni componente del conto economico.</p>`;
 }
 
 let deb;
@@ -794,20 +876,6 @@ async function diagArt(item, i){
   box.innerHTML=h; box.dataset.loaded='1';
 }
 
-function vista(v){
-  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.v===v));
-  $("#v-doc").style.display = v==="doc"?"":"none";
-  $("#v-anom").style.display = v==="anom"?"":"none";
-  $("#v-costi").style.display = v==="costi"?"":"none";
-  $("#v-qual").style.display = v==="qual"?"":"none";
-  $("#v-bonifica").style.display = v==="bonifica"?"":"none";
-  $("#v-sql").style.display = v==="sql"?"":"none";
-  if(v==="anom") caricaAnom();
-  if(v==="costi") caricaCosti();
-  if(v==="qual") caricaQual();
-  if(v==="bonifica") caricaBonifica();
-  if(v==="sql") caricaSql();
-}
 let COSTIMESI=6;
 function setCostiMesi(m){ COSTIMESI=m; caricaCosti(); }
 async function caricaCosti(){
@@ -1127,5 +1195,11 @@ init();
 if __name__ == "__main__":
     import os
     porta = int(os.getenv("CDG_PORT", "8765"))   # 5000 e' riservata su alcuni Windows; override con CDG_PORT
-    print(f"CDG_QV Esplora ->  http://127.0.0.1:{porta}   (Ctrl+C per fermare)")
-    app.run(host="127.0.0.1", port=porta, debug=False)
+    host = os.getenv("CDG_HOST", "127.0.0.1")    # 127.0.0.1 = solo locale (IIS fa reverse-proxy); 0.0.0.0 = tutta la rete
+    print(f"CDG_QV Esplora ->  http://{host}:{porta}   (Ctrl+C per fermare)")
+    try:
+        # server di produzione multi-utente (dietro IIS/ARR)
+        from waitress import serve
+        serve(app, host=host, port=porta, threads=8)
+    except ImportError:
+        app.run(host=host, port=porta, debug=False, threaded=True)
