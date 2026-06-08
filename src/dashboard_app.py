@@ -474,7 +474,12 @@ OGGETTI_SQL = [
      "spieg": "Motore del ricalcolo (parametrico @Anno, @MeseMax). Costruisce il seed (giacenza/costo d'apertura) e "
               "cicla i mesi: per ogni mese media ponderata di periodo = (val.iniziale + acquisti) / (qta iniziale + "
               "acquisti), separando puro e oneri; il mese successivo parte dai valori di fine. Movimenti classificati "
-              "per WAPMovementType (acquisti/vendite/resi; trasferimenti e 'ignora' esclusi)."},
+              "per WAPMovementType (acquisti/vendite/resi; trasferimenti e 'ignora' esclusi). Gli articoli in "
+              "kodice.articoli_esclusi_costo (voci di servizio) sono esclusi dal ricalcolo."},
+    {"gruppo": "6 · Valorizzazione magazzino (ricalcolo WAP)", "nome": "kodice.articoli_esclusi_costo", "tipo": "table",
+     "spieg": "Codici di SERVIZIO/non-prodotto da NON valorizzare (es. SPESEDITRASPORTO = 'Spese di trasporto'): hanno "
+              "movimenti che generano quantita' negative e non sono merce. Esclusi dal ricalcolo WAP, quindi anche da "
+              "vw_costo_eff, vw_qualita_costo e dal report inventario. Per escluderne altri si aggiunge una riga qui."},
     {"gruppo": "6 · Valorizzazione magazzino (ricalcolo WAP)", "nome": "kodice.vw_costo_eff", "tipo": "view",
      "spieg": "COSTO UNITARIO EFFICACE per articolo, scelto col METODO DI MAGO in base al ValuationType "
               "(11272206 = MPP/WAP, 11272194 = MEDIO annuale). MPP: ultimo costo del ricalcolo ad Aprile 2026 "

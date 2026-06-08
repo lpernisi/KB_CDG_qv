@@ -120,6 +120,10 @@ tocca Mago**:
   EPAL, senza WAP né acquisti) si usa come ultimo ripiego il **prezzo del report Mago** (`MEDIO_REPORT`), così
   tutto resta valorizzato e nulla è "mancante". Dove abbiamo un costo **indipendente** molto diverso dal prezzo
   Mago (report < ½ o > 2× del nostro) la riga è segnalata come **prezzo report sospetto** (foglio dedicato).
+- **Articoli esclusi dal costo** (`kodice.articoli_esclusi_costo`): codici di SERVIZIO/non-prodotto (es.
+  `SPESEDITRASPORTO` = "Spese di trasporto") con movimenti a quantità negativa, che non sono merce. Filtrati nel seed
+  di `usp_ricalc_wap` → niente righe `wap_ricalc`, quindi esclusi anche da `vw_costo_eff`, `vw_qualita_costo` e dal
+  report inventario. Per escluderne altri basta inserire una riga (nessuna modifica al codice).
 
 ## Nomi sorgente Mago (CONFERMATI)
 

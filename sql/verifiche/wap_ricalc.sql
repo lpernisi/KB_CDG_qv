@@ -84,6 +84,27 @@ CREATE TABLE kodice.wap_apertura_override (
 );
 GO
 
+-- =============================================================================
+-- articoli_esclusi_costo — codici di SERVIZIO/non-prodotto da NON valorizzare.
+-- -----------------------------------------------------------------------------
+-- Alcuni "articoli" di Mago non sono merce di magazzino ma voci di servizio (es.
+-- SPESEDITRASPORTO = "Spese di trasporto"): hanno movimenti che generano quantita'
+-- negative e NON devono entrare nel costo del prodotto (il trasporto e' una voce a se'
+-- del Conto Economico). Vengono esclusi dal ricalcolo WAP -> quindi anche da
+-- vw_costo_eff, vw_qualita_costo e dal report inventario. Per escluderne altri basta
+-- inserire una riga qui (nessuna modifica al codice).
+IF OBJECT_ID('kodice.articoli_esclusi_costo', 'U') IS NULL
+CREATE TABLE kodice.articoli_esclusi_costo (
+    Item  varchar(21)  NOT NULL CONSTRAINT PK_articoli_esclusi_costo PRIMARY KEY,
+    Nota  varchar(200) NULL
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM kodice.articoli_esclusi_costo WHERE Item = 'SPESEDITRASPORTO')
+    INSERT INTO kodice.articoli_esclusi_costo (Item, Nota)
+    VALUES ('SPESEDITRASPORTO', 'Voce di servizio (Spese di trasporto): non e'' un prodotto, escluso dal costo materiali.');
+GO
+
 CREATE OR ALTER PROCEDURE kodice.usp_ricalc_wap
     @Anno    smallint,
     @MeseMax tinyint = 12
@@ -132,7 +153,8 @@ BEGIN
     LEFT JOIN ubi  ON ubi.Item  = u.Item
     LEFT JOIN baln ON baln.Item = u.Item
     LEFT JOIN seedw sw ON sw.Item = u.Item
-    LEFT JOIN ovr ov ON ov.Item = u.Item;
+    LEFT JOIN ovr ov ON ov.Item = u.Item
+    WHERE NOT EXISTS (SELECT 1 FROM kodice.articoli_esclusi_costo x WHERE x.Item = u.Item);  -- voci di servizio (es. SPESEDITRASPORTO)
 
     DECLARE @m tinyint = 1;
     WHILE @m <= @MeseMax
