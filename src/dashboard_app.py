@@ -717,6 +717,29 @@ def api_consolida_mese():
     return jsonify({"ok": True})
 
 
+# Espressioni di dimensione del CE (condivise tra /api/ce e /api/ce_drill).
+CE_DIMS = {
+    "canale":        "CASE WHEN sd.CustSupp='135774' THEN 'SAVINI' ELSE COALESCE(NULLIF(LTRIM(RTRIM(ctg.Notes)),''), opt.Category, '(n/d)') END",
+    "dipartimento":  "CASE WHEN ctg.Notes IN ('BTOB tradizionale','Professionale','Intercompany Savini') THEN 'BTOB' ELSE 'ONLINE' END",
+    "cliente":       "COALESCE(cs.CompanyName, sd.CustSupp)",
+    "agente":        "COALESCE(sp.Name, opt.Salesperson, '(n/d)')",
+    "tipo_articolo": "COALESCE(ity.Description, it.ItemType, '(n/d)')",
+    "linea_articolo":"COALESCE(hc.Description, it.HomogeneousCtg, '(n/d)')",
+    "mese":          "RIGHT('0'+CAST(f.mese AS varchar(2)),2)",
+}
+CE_JOINS = """
+        FROM core.fatto_riga f
+        JOIN      KODICEBAGNO_4.dbo.MA_SaleDoc sd  ON sd.SaleDocId = f.sale_doc_id
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions opt ON opt.Customer = sd.CustSupp AND opt.CustSuppType = sd.CustSuppType
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustomerCtg ctg ON ctg.Category = opt.Category
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs  ON cs.CustSupp = sd.CustSupp AND cs.CustSuppType = sd.CustSuppType
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_SalesPeople sp ON sp.Salesperson = opt.Salesperson
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_Items it ON LTRIM(RTRIM(it.Item)) = f.codice_articolo
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_ItemTypes ity ON ity.CodeType = it.ItemType
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_HomogeneousCtg hc ON hc.Category = it.HomogeneousCtg
+"""
+
+
 @app.get("/api/ce")
 def api_ce():
     """Conto Economico per dimensione (alla Qlik). Fatturato + Materiale (nostro costo) + Margine,
@@ -724,16 +747,7 @@ def api_ce():
     anno = int(request.args.get("anno"))
     mese = request.args.get("mese")
     dim = request.args.get("dim", "canale")
-    DIMS = {
-        "canale":        "CASE WHEN sd.CustSupp='135774' THEN 'SAVINI' ELSE COALESCE(NULLIF(LTRIM(RTRIM(ctg.Notes)),''), opt.Category, '(n/d)') END",
-        "dipartimento":  "CASE WHEN ctg.Notes IN ('BTOB tradizionale','Professionale','Intercompany Savini') THEN 'BTOB' ELSE 'ONLINE' END",
-        "cliente":       "COALESCE(cs.CompanyName, sd.CustSupp)",
-        "agente":        "COALESCE(sp.Name, opt.Salesperson, '(n/d)')",
-        "tipo_articolo": "COALESCE(ity.Description, it.ItemType, '(n/d)')",
-        "linea_articolo":"COALESCE(hc.Description, it.HomogeneousCtg, '(n/d)')",
-        "mese":          "RIGHT('0'+CAST(f.mese AS varchar(2)),2)",
-    }
-    col = DIMS.get(dim, DIMS["canale"])
+    col = CE_DIMS.get(dim, CE_DIMS["canale"])
     params = {"anno": anno}
     wmese = ""
     if mese and mese not in ("0", ""):
@@ -744,20 +758,42 @@ def api_ce():
                SUM(f.ricavo_netto - f.mdc1)   AS materiale,
                SUM(f.mdc1)                    AS margine,
                COUNT(DISTINCT f.sale_doc_id)  AS n_ordini
-        FROM core.fatto_riga f
-        JOIN      KODICEBAGNO_4.dbo.MA_SaleDoc sd  ON sd.SaleDocId = f.sale_doc_id
-        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions opt ON opt.Customer = sd.CustSupp AND opt.CustSuppType = sd.CustSuppType
-        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustomerCtg ctg ON ctg.Category = opt.Category
-        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs  ON cs.CustSupp = sd.CustSupp AND cs.CustSuppType = sd.CustSuppType
-        LEFT JOIN KODICEBAGNO_4.dbo.MA_SalesPeople sp ON sp.Salesperson = opt.Salesperson
-        LEFT JOIN KODICEBAGNO_4.dbo.MA_Items it ON LTRIM(RTRIM(it.Item)) = f.codice_articolo
-        LEFT JOIN KODICEBAGNO_4.dbo.MA_ItemTypes ity ON ity.CodeType = it.ItemType
-        LEFT JOIN KODICEBAGNO_4.dbo.MA_HomogeneousCtg hc ON hc.Category = it.HomogeneousCtg
+        {CE_JOINS}
         WHERE f.anno = :anno {wmese}
         GROUP BY {col}
         ORDER BY SUM(f.ricavo_netto) DESC
     """, **params)
     return jsonify({"dim": dim, "righe": rows})
+
+
+@app.get("/api/ce_drill")
+def api_ce_drill():
+    """Drill-down di una riga del CE sul CLIENTE: dato un valore di dimensione (es. Canale='(n/d)'),
+    elenca i clienti che lo compongono con codice, categoria/notes (per capire perche' non agganciano un canale)."""
+    anno = int(request.args.get("anno"))
+    mese = request.args.get("mese")
+    dim = request.args.get("dim", "canale")
+    val = request.args.get("val", "")
+    col = CE_DIMS.get(dim, CE_DIMS["canale"])
+    params = {"anno": anno, "val": val}
+    wmese = ""
+    if mese and mese not in ("0", ""):
+        wmese = " AND f.mese = :mese"; params["mese"] = int(mese)
+    rows = righe(f"""
+        SELECT COALESCE(cs.CompanyName, sd.CustSupp) AS cliente,
+               LTRIM(RTRIM(sd.CustSupp))             AS codice,
+               MAX(LTRIM(RTRIM(opt.Category)))       AS categoria,
+               MAX(LTRIM(RTRIM(ctg.Notes)))          AS notes,
+               SUM(f.ricavo_netto)            AS fatturato,
+               SUM(f.ricavo_netto - f.mdc1)   AS materiale,
+               SUM(f.mdc1)                    AS margine,
+               COUNT(DISTINCT f.sale_doc_id)  AS n_ordini
+        {CE_JOINS}
+        WHERE f.anno = :anno {wmese} AND ({col}) = :val
+        GROUP BY COALESCE(cs.CompanyName, sd.CustSupp), LTRIM(RTRIM(sd.CustSupp))
+        ORDER BY SUM(f.ricavo_netto) DESC
+    """, **params)
+    return jsonify({"dim": dim, "val": val, "righe": rows})
 
 
 @app.get("/api/raffronto_costo")
@@ -1139,7 +1175,9 @@ async function caricaCE(){
   h+=`<tr style="font-weight:700;background:#efeae0"><td>Totali</td><td class="num">${eur(tot.f)}</td><td class="num">${eur(tot.ma)}</td>
     <td class="num">${pct(tot.ma)}</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>
     <td class="num">${eur(tot.mg)}</td><td class="num">${pct(tot.mg)}</td><td class="num"></td></tr>`;
-  h+=d.righe.map(r=>`<tr><td>${esc(r.dim||'(n/d)')}</td>
+  h+=d.righe.map(r=>`<tr><td>${CEDIM!=='cliente'
+        ? `<a href="#" onclick="ceDrill(this);return false" data-val="${esc(String(r.dim==null?'(n/d)':r.dim)).replace(/"/g,'&quot;')}" title="drill-down sui clienti">${esc(r.dim||'(n/d)')}</a>`
+        : esc(r.dim||'(n/d)')}</td>
     <td class="num">${eur(r.fatturato)}</td><td class="num">${eur(r.materiale)}</td>
     <td class="num">${r.fatturato?(100*Number(r.materiale)/Number(r.fatturato)).toFixed(1):'0'}%</td>
     <td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>
@@ -1147,6 +1185,29 @@ async function caricaCE(){
     <td class="num">${num(r.n_ordini)}</td></tr>`).join("") || `<tr><td colspan="11" class="muted">Nessun dato.</td></tr>`;
   h+=`</tbody></table></div></div>`;
   $("#ce").innerHTML=h;
+}
+async function ceDrill(el){
+  const tr=el.closest('tr'), nxt=tr.nextElementSibling;
+  if(nxt && nxt.classList.contains('cedrill')){ nxt.remove(); return; }
+  const val=el.dataset.val;
+  const {a,m}=periodo();
+  const d=await j(`/api/ce_drill?anno=${a}${CEANNO?'':'&mese='+m}&dim=${CEDIM}&val=${encodeURIComponent(val)}`);
+  const R=d.righe||[];
+  let inner=`<div style="padding:6px 10px"><strong>${R.length}</strong> clienti in «${esc(val)}»`;
+  if(CEDIM==='canale' && val==='(n/d)') inner+=` <span class="muted">— non agganciano alcun canale: manca la categoria cliente o la sua mappatura (Raggrupp_Categorie). La colonna Categoria/Notes mostra il perché.</span>`;
+  inner+=`<table style="margin-top:6px"><thead><tr><th>Cliente</th><th>Codice</th><th>Categoria</th><th>Notes (Raggr.)</th>
+     <th class="num">Fatturato</th><th class="num">Materiale</th><th class="num">% Mat</th><th class="num">Margine</th><th class="num">Nr. Ord.</th></tr></thead><tbody>`;
+  inner+=R.map(x=>`<tr><td>${esc(x.cliente||'')}</td><td><code>${esc(x.codice||'')}</code></td>
+     <td>${x.categoria?esc(x.categoria):'<span class="muted">—</span>'}</td>
+     <td>${x.notes?esc(x.notes):'<span class="muted">—</span>'}</td>
+     <td class="num">${eur(x.fatturato)}</td><td class="num">${eur(x.materiale)}</td>
+     <td class="num">${x.fatturato?(100*Number(x.materiale)/Number(x.fatturato)).toFixed(1):'0'}%</td>
+     <td class="num">${eur(x.margine)}</td><td class="num">${num(x.n_ordini)}</td></tr>`).join("")
+     || `<tr><td colspan="9" class="muted">Nessun cliente.</td></tr>`;
+  inner+=`</tbody></table></div>`;
+  const det=document.createElement('tr'); det.className='cedrill';
+  const td=document.createElement('td'); td.colSpan=tr.children.length; td.style.background='#f6f3ec'; td.innerHTML=inner;
+  det.appendChild(td); tr.after(det);
 }
 
 let deb;
