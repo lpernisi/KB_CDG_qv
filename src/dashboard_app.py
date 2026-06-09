@@ -1050,14 +1050,22 @@ function tableToXls(tbl){
   a.download=nomeExport()+'.xls'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
 function aggiungiExport(tbl){
+  // niente icona sulle tabelle ANNIDATE (drill cliente, scheda costo, ...): il loro
+  // contenitore viene rimosso/ricreato e il pulsante resterebbe orfano (duplicati).
+  if(tbl.parentElement && tbl.parentElement.closest('table')) return;
   if(tbl.dataset.exp) return; tbl.dataset.exp='1';
   const btn=document.createElement('button'); btn.className='expbtn'; btn.title='Esporta la tabella in Excel';
   btn.textContent='Excel ↓';
+  btn._tbl=tbl;   // riferimento alla tabella: per rimuovere il pulsante se la tabella sparisce
   btn.onclick=(e)=>{ e.preventDefault(); e.stopPropagation(); tableToXls(tbl); };
   let anchor=tbl; const wrap=tbl.closest('div[style*="overflow"]'); if(wrap) anchor=wrap;
   if(anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor);
 }
-function scanExport(){ document.querySelectorAll('.content table').forEach(aggiungiExport); }
+function scanExport(){
+  // rimuovi i pulsanti orfani (tabella non più nel DOM) per evitare duplicati accumulati
+  document.querySelectorAll('.expbtn').forEach(b=>{ if(!b._tbl || !document.body.contains(b._tbl)) b.remove(); });
+  document.querySelectorAll('.content table').forEach(aggiungiExport);
+}
 let _scanT;
 function avviaExport(){ const o=new MutationObserver(()=>{ clearTimeout(_scanT); _scanT=setTimeout(scanExport,150); }); o.observe(document.body,{childList:true,subtree:true}); scanExport(); }
 
