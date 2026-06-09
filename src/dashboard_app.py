@@ -884,12 +884,13 @@ PAGINA = r"""<!DOCTYPE html>
   .banner{padding:10px 14px;border-radius:10px;margin:0 0 14px;font-size:13.5px;border:1px solid var(--line)}
   .banner.ok{background:var(--okbg);border-color:#bfe0cb}
   .banner.warn{background:var(--warnbg);border-color:#e6d3b3}
-  .expbtn{float:right;font:inherit;font-size:11.5px;border:1px solid var(--line);background:#fff;border-radius:6px;
-          padding:2px 9px;cursor:pointer;color:var(--accent);margin:0 0 6px 8px}
-  .expbtn:hover{background:#eef2f7}
+  .expbtn{position:absolute;top:8px;right:10px;z-index:6;font:inherit;font-size:11px;line-height:1;
+          border:1px solid var(--line);background:#fff;border-radius:6px;padding:3px 8px;cursor:pointer;
+          color:var(--muted);box-shadow:0 1px 2px rgba(0,0,0,.07);opacity:.7;transition:opacity .12s,color .12s}
+  .expbtn:hover{opacity:1;color:var(--accent);background:#eef2f7}
   .row{display:grid;grid-template-columns:380px 1fr;gap:20px}
   @media(max-width:900px){.row{grid-template-columns:1fr}}
-  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;position:relative}
   .panel h2{font-family:Georgia,serif;font-size:16px;margin:0 0 10px}
   table{border-collapse:collapse;width:100%;font-size:13px}
   th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
@@ -1055,11 +1056,14 @@ function aggiungiExport(tbl){
   if(tbl.parentElement && tbl.parentElement.closest('table')) return;
   if(tbl.dataset.exp) return; tbl.dataset.exp='1';
   const btn=document.createElement('button'); btn.className='expbtn'; btn.title='Esporta la tabella in Excel';
-  btn.textContent='Excel ↓';
+  btn.textContent='↓ Excel';
   btn._tbl=tbl;   // riferimento alla tabella: per rimuovere il pulsante se la tabella sparisce
   btn.onclick=(e)=>{ e.preventDefault(); e.stopPropagation(); tableToXls(tbl); };
-  let anchor=tbl; const wrap=tbl.closest('div[style*="overflow"]'); if(wrap) anchor=wrap;
-  if(anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor);
+  // Ancora al PANNELLO (position:relative) in alto a destra: fuori dal flusso, niente colonna vuota.
+  const panel=tbl.closest('.panel');
+  if(panel){ panel.appendChild(btn); }
+  else { let anchor=tbl; const wrap=tbl.closest('div[style*="overflow"]'); if(wrap) anchor=wrap;
+         if(anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor); }
 }
 function scanExport(){
   // rimuovi i pulsanti orfani (tabella non più nel DOM) per evitare duplicati accumulati
