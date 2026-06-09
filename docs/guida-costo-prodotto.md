@@ -1,6 +1,6 @@
 # CDG · Sezione "Costo dei materiali" — guida alla lettura
 
-*Per Direzione e Amministrazione. Dashboard: `https://<sito>/tools/cdg/` → sezione **Costo dei materiali**.*
+*Per Direzione e Amministrazione. Dashboard: `https://pricing.kvstore.online/tools/cdg/` → sezione **Costo dei materiali**.*
 
 ## Da dove arriva il costo (in breve)
 Non usiamo più il costo "grezzo" del gestionale (che su molti articoli era inaffidabile: quantità che vanno
