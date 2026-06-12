@@ -381,7 +381,15 @@ seed AS (
                ROW_NUMBER() OVER (PARTITION BY LTRIM(RTRIM(Item)) ORDER BY EndPeriodDate DESC) rn
         FROM KODICEBAGNO_4.dbo.MA_ItemsWAP WHERE Storage='' AND WAPCost>0 AND EndPeriodDate < '2026-01-01') t WHERE rn=1
 ),
-n25 AS (SELECT Item, WAPCost_ricalc, QtaFin FROM kodice.wap_ricalc WHERE Anno=2025 AND Mese=12),
+-- NostroDic2025 = ULTIMO costo 2025 noto (NON forzatamente Dicembre): se la giacenza si azzera a
+-- meta' anno il roll non ha righe dopo, ma il costo "sopravvive a giacenza 0" -> prendi l'ultimo mese con costo>0.
+n25 AS (
+    SELECT Item, WAPCost_ricalc, QtaFin FROM (
+        SELECT Item, WAPCost_ricalc, QtaFin,
+               ROW_NUMBER() OVER (PARTITION BY Item ORDER BY Mese DESC) rn
+        FROM kodice.wap_ricalc WHERE Anno=2025 AND WAPCost_ricalc > 0
+    ) t WHERE rn=1
+),
 magoD AS (SELECT LTRIM(RTRIM(Item)) AS Item, MAX(WAPCost) AS WAPCost
           FROM KODICEBAGNO_4.dbo.MA_ItemsWAP WHERE Storage='' AND YEAR(EndPeriodDate)=2025 AND MONTH(EndPeriodDate)=12 GROUP BY LTRIM(RTRIM(Item))),
 lc AS (SELECT LTRIM(RTRIM(Item)) AS Item, MAX(NULLIF(LastCost,0)) AS lastc
