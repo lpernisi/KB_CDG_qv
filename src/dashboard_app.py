@@ -688,6 +688,118 @@ def api_quadratura_materiale():
                     "dettaglio": [r for r in dett if r["Ruolo"] != "RIMANENZE"]})
 
 
+def _ric_periodo():
+    anno = int(request.args.get("anno", 2026))
+    mda = int(request.args.get("mese_da", 1))
+    mmax = righe("SELECT MAX(mese) AS m FROM core.fatto_riga WHERE anno=:a", a=anno)
+    ma = int(request.args.get("mese_a") or (mmax[0]["m"] if mmax and mmax[0]["m"] else 12))
+    return anno, mda, ma
+
+
+@app.get("/api/riconciliazione_cogs")
+def api_riconciliazione_cogs():
+    """Prospetto di riconciliazione: dal costo del venduto CDG (abbinato al fatturato) al CONSUMO materie
+    a bilancio (Acquisti GL +/- variazione rimanenze), esplicitando ogni componente (sfasamento spedizione-
+    fattura, rettifiche, resi, ricevuto-non-fatturato, drift apertura). Identita' garantita per costruzione."""
+    anno, mda, ma = _ric_periodo()
+    fn = lambda v: float(v or 0)
+    cogs = fn(righe("SELECT SUM(ricavo_netto-mdc1) v FROM core.fatto_riga WHERE anno=:a AND mese BETWEEN :d AND :h",
+                    a=anno, d=mda, h=ma)[0]["v"])
+    w = righe("""SELECT SUM(QtaVend*WAPCost_ricalc) vend, SUM(QtaResi*WAPCost_ricalc) resi,
+                        SUM(QtaRettTrasf*WAPCost_ricalc) rett, SUM(ValAcqPuro+ValAcqOneri) acq
+                 FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]
+    vend = fn(w["vend"]); resi = fn(w["resi"]); rett = fn(w["rett"]); acq = fn(w["acq"])
+    rin_n = fn(righe("SELECT SUM(ValPuroIniz+ValOneriIniz) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:d", a=anno, d=mda)[0]["v"])
+    rfin_n = fn(righe("SELECT SUM(ValPuroFin+ValOneriFin) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:h", a=anno, h=ma)[0]["v"])
+    gl_acq = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
+        FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+        WHERE q.Componente='MATERIALE' AND q.Ruolo IN ('ACQUISTO','ONERE_ACQUISTO')
+          AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
+    rb = righe("""SELECT
+        (SELECT ISNULL(SUM(b.Debit-b.Credit),0) FROM KODICEBAGNO_4.dbo.MA_ChartOfAccountsBalances b
+           JOIN kodice.conti_quadratura q ON q.Account=b.Account AND q.Componente='MATERIALE' AND q.Ruolo='RIMANENZE'
+          WHERE b.FiscalYear=:a AND b.BalanceType=3145728) ini,
+        (SELECT ISNULL(SUM(b.Debit-b.Credit),0) FROM KODICEBAGNO_4.dbo.MA_ChartOfAccountsBalances b
+           JOIN kodice.conti_quadratura q ON q.Account=b.Account AND q.Componente='MATERIALE' AND q.Ruolo='RIMANENZE'
+          WHERE b.FiscalYear=:a AND (b.BalanceType=3145728 OR (b.BalanceType=3145730 AND b.BalanceMonth BETWEEN 1 AND :h))) fin
+    """, a=anno, h=ma)[0]
+    rin_b = fn(rb["ini"]); rfin_b = fn(rb["fin"])
+    consumo_fisico = rin_n + acq - rfin_n
+    consumo_bil = gl_acq + rin_b - rfin_b
+    r = lambda x: round(x, 2)
+    righe_out = [
+        {"n": 1, "k": "cogs", "label": "Costo del venduto CDG (abbinato al fatturato)", "val": r(cogs), "tot": True, "drill": True},
+        {"n": 2, "k": "sped", "label": "+ Merce spedita non ancora fatturata (sfasamento vendite)", "val": r(vend - cogs), "drill": True},
+        {"n": 3, "k": "fisico", "label": "= Costo del venduto FISICO (scarico magazzino vendite)", "val": r(vend), "tot": True, "drill": True},
+        {"n": 4, "k": "rett", "label": "+ Rettifiche / perdite di magazzino (non vendita)", "val": r(-rett), "drill": True},
+        {"n": 5, "k": "resi", "label": "− Resi da clienti (rientro merce)", "val": r(-resi), "drill": True},
+        {"n": 6, "k": "consfis", "label": "= Consumo materie (flusso fisico magazzino)", "val": r(consumo_fisico), "tot": True},
+        {"n": 7, "k": "ricnf", "label": "− Maggior carico vs fatture acquisto (ricevuto-non-fatturato)", "val": r(-(acq - gl_acq)), "drill": True},
+        {"n": 8, "k": "apert", "label": "+ Allineamento valorizzazione apertura (drift report Mago)", "val": r((rin_b - rin_n) + (rfin_n - rfin_b)), "drill": True},
+        {"n": 9, "k": "bilancio", "label": "= Consumo materie a BILANCIO (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
+    ]
+    return jsonify({"anno": anno, "mese_da": mda, "mese_a": ma, "righe": righe_out,
+                    "contabile": {"acquisti": r(gl_acq), "rim_iniz": r(rin_b), "rim_fin": r(rfin_b),
+                                  "var_rim": r(rin_b - rfin_b), "consumo": r(consumo_bil)},
+                    "nostro": {"acquisti_carico": r(acq), "rim_iniz": r(rin_n), "rim_fin": r(rfin_n),
+                               "var_rim": r(rin_n - rfin_n)}})
+
+
+@app.get("/api/riconciliazione_drill")
+def api_riconciliazione_drill():
+    """Drill-down di una riga del prospetto: lista articoli/documenti che la compongono."""
+    anno, mda, ma = _ric_periodo()
+    k = request.args.get("k", "")
+    if k == "cogs":
+        return jsonify(righe("""SELECT TOP 300 codice_articolo AS Item, SUM(quantita) AS qta,
+            ROUND(SUM(ricavo_netto-mdc1),2) AS valore FROM core.fatto_riga
+            WHERE anno=:a AND mese BETWEEN :d AND :h AND tipo_articolo='MERCE'
+            GROUP BY codice_articolo HAVING SUM(ricavo_netto-mdc1)<>0 ORDER BY SUM(ricavo_netto-mdc1) DESC""", a=anno, d=mda, h=ma))
+    if k in ("sped", "fisico"):
+        # per articolo: scarico vendite 506 a costo certificato vs COGS documento
+        return jsonify(righe("""
+            WITH scar AS (
+                SELECT LTRIM(RTRIM(d.Item)) AS Item, SUM(d.Qty*ISNULL(cm.Costo,0)) AS v506
+                FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
+                JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
+                LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=LTRIM(RTRIM(d.Item)) AND cm.Anno=:a AND cm.Mese=MONTH(h.PostingDate)
+                WHERE h.WAPMovementType=2032533506 AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+                GROUP BY LTRIM(RTRIM(d.Item))),
+            doc AS (SELECT codice_articolo AS Item, SUM(ricavo_netto-mdc1) AS cogs FROM core.fatto_riga
+                    WHERE anno=:a AND mese BETWEEN :d AND :h GROUP BY codice_articolo)
+            SELECT TOP 300 s.Item, ROUND(s.v506,2) AS scarico_magazzino, ROUND(ISNULL(doc.cogs,0),2) AS cogs_documento,
+                   ROUND(s.v506-ISNULL(doc.cogs,0),2) AS differenza
+            FROM scar s LEFT JOIN doc ON doc.Item=s.Item
+            WHERE ABS(s.v506-ISNULL(doc.cogs,0)) > 1 ORDER BY ABS(s.v506-ISNULL(doc.cogs,0)) DESC""", a=anno, d=mda, h=ma))
+    if k in ("rett", "resi"):
+        tipo = 2032533507 if k == "rett" else 2032533509
+        return jsonify(righe("""SELECT TOP 300 h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item,
+            ROUND(SUM(d.Qty),0) AS qta, ROUND(SUM(d.Qty*ISNULL(cm.Costo,0)),2) AS valore
+            FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
+            LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=LTRIM(RTRIM(d.Item)) AND cm.Anno=:a AND cm.Mese=MONTH(h.PostingDate)
+            WHERE h.WAPMovementType=:t AND h.InvRsn NOT IN ('MOV-DEP','KL-TRASF')
+              AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+            GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item)) HAVING ABS(SUM(d.Qty*ISNULL(cm.Costo,0)))>1
+            ORDER BY ABS(SUM(d.Qty*ISNULL(cm.Costo,0))) DESC""", a=anno, t=tipo, d=mda, h=ma))
+    if k == "ricnf":
+        return jsonify(righe("""SELECT TOP 300 h.Supplier AS fornitore, h.DocNo AS bolla, h.DocumentDate AS data,
+            ROUND(SUM(d.TaxableAmount),2) AS valore
+            FROM KODICEBAGNO_4.dbo.MA_PurchaseDoc h JOIN KODICEBAGNO_4.dbo.MA_PurchaseDocDetail d ON d.PurchaseDocId=h.PurchaseDocId
+            WHERE h.DocumentType=9830400 AND (h.Invoiced=0 OR h.Invoiced IS NULL) AND LTRIM(RTRIM(d.Item))<>''
+              AND YEAR(h.DocumentDate)=:a AND MONTH(h.DocumentDate) BETWEEN :d AND :h
+            GROUP BY h.Supplier, h.DocNo, h.DocumentDate ORDER BY SUM(d.TaxableAmount) DESC""", a=anno, d=mda, h=ma))
+    if k == "apert":
+        # articoli con maggior scostamento di valore d'apertura nostro vs ultimo costo Mago (proxy del drift)
+        return jsonify(righe("""SELECT TOP 300 w.Item, ROUND(w.QtaIniz,0) AS giacenza,
+            ROUND(w.WAPCost_ricalc,2) AS costo_nostro, ROUND(w.WAPCost_Mago,2) AS costo_mago,
+            ROUND(w.QtaIniz*(ISNULL(w.WAPCost_Mago,0)-w.WAPCost_ricalc),2) AS differenza
+            FROM kodice.wap_ricalc w WHERE w.Anno=:a AND w.Mese=:d AND w.QtaIniz>0 AND w.WAPCost_Mago IS NOT NULL
+              AND ABS(w.QtaIniz*(ISNULL(w.WAPCost_Mago,0)-w.WAPCost_ricalc))>1
+            ORDER BY ABS(w.QtaIniz*(ISNULL(w.WAPCost_Mago,0)-w.WAPCost_ricalc)) DESC""", a=anno, d=mda))
+    return jsonify([])
+
+
 @app.get("/api/cerca_articolo")
 def api_cerca_articolo():
     """Ricerca articolo (codice o descrizione) per aprire la scheda costo di QUALUNQUE articolo."""
@@ -1048,6 +1160,7 @@ PAGINA = r"""<!DOCTYPE html>
     <div class="sec" data-s="ce" onclick="sezione('ce')">Riepilogo CE</div>
     <div class="sec on" data-s="ricavi" onclick="sezione('ricavi')">Ricavi</div>
     <div class="sec" data-s="materiali" onclick="sezione('materiali')">Costo dei materiali</div>
+    <div class="sec" data-s="riconc" onclick="sezione('riconc')">Riconciliazione ↔ Co.Ge.</div>
     <div class="sec todo" data-s="commerciali" onclick="sezione('commerciali')">Costi commerciali</div>
     <div class="sec todo" data-s="trasporti" onclick="sezione('trasporti')">Costi di trasporto</div>
     <div class="sec todo" data-s="imballi" onclick="sezione('imballi')">Imballi</div>
@@ -1077,6 +1190,11 @@ PAGINA = r"""<!DOCTYPE html>
           <div class="panel"><h2>Dettaglio documento</h2><div id="dett"><p class="muted">Scegli un documento a sinistra.</p></div></div>
         </div>
       </div>
+    </section>
+
+    <section id="sec-riconc" class="sez-main" style="display:none">
+      <h2 class="grp">Riconciliazione · costo del venduto CdG ↔ Contabilità</h2>
+      <div id="riconc"><p class="muted">Carico…</p></div>
     </section>
 
     <section id="sec-materiali" class="sez-main" style="display:none">
@@ -1187,7 +1305,7 @@ async function init(){
   const h=location.hash.replace('#','');
   if(['qual','bonifica','trend'].includes(h)){ SUBV=h; sezione('materiali'); }
   else if(['anom','costi'].includes(h)){ SUBW=h; sezione('wap'); }
-  else if(['ce','ricavi','materiali','wap','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
+  else if(['ce','ricavi','materiali','riconc','wap','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
   else sezione('ricavi');
   avviaExport();
 }
@@ -1195,6 +1313,7 @@ function periodo(){ const [a,m]=$("#periodo").value.split("-"); return {a:+a,m:+
 function onPeriodo(){ SEL=null; cerca();
   if(SEZ==='ce') caricaCE();
   if(SEZ==='materiali'){ aggiornaStatoMese(); caricaSub(); }
+  if(SEZ==='riconc') caricaRiconc();
   if(SEZ==='wap') sottoWap(SUBW);
 }
 function sezione(s){
@@ -1204,8 +1323,53 @@ function sezione(s){
   if(s==='ce') caricaCE();
   else if(s==='ricavi') cerca();
   else if(s==='materiali'){ aggiornaStatoMese(); sottoVista(SUBV); }
+  else if(s==='riconc') caricaRiconc();
   else if(s==='wap') sottoWap(SUBW);
   else if(s==='sql') caricaSql();
+}
+async function caricaRiconc(){
+  const {a,m}=periodo();
+  const d=await j(`/api/riconciliazione_cogs?anno=${a}&mese_da=1&mese_a=${m}`);
+  window._ricP={a,m};
+  const co=d.contabile||{}, no=d.nostro||{};
+  let h=`<p class="muted">Periodo <strong>${a}</strong> (mesi 1–${m}, progressivo). Ponte dal <strong>costo del venduto CdG</strong> (abbinato al fatturato, per la marginalità) al <strong>consumo materie a bilancio</strong>. Clicca una riga ▸ per il dettaglio dei documenti/articoli.</p>`;
+  h+=`<div class="row" style="grid-template-columns:1fr 330px">`;
+  h+=`<div class="panel"><h2>Ponte CdG → Contabilità</h2><table><tbody>`;
+  (d.righe||[]).forEach(x=>{
+    const tot=x.tot?'font-weight:700;border-top:2px solid var(--line);background:#faf8f2':'';
+    h+=`<tr class="${x.drill?'drill':''}" style="${tot}" ${x.drill?`onclick="ricDrill('${x.k}')"`:''}>
+        <td>${x.drill?'<span class="muted">▸</span> ':'&nbsp;&nbsp;'}${esc(x.label)}</td>
+        <td class="num">${eur(x.val)}</td></tr>
+        <tr class="det" id="ricdet_${x.k}" style="display:none"><td colspan="2"><div class="dbox" id="ricbox_${x.k}"></div></td></tr>`;
+  });
+  h+=`</tbody></table></div>`;
+  h+=`<div class="panel"><h2>Dati contabili (raffronto)</h2><table><tbody>
+      <tr><td>Acquisti (GL 06011000 + oneri)</td><td class="num">${eur(co.acquisti)}</td></tr>
+      <tr><td>+ Rimanenze iniziali (bilancio)</td><td class="num">${eur(co.rim_iniz)}</td></tr>
+      <tr><td>− Rimanenze finali (bilancio)</td><td class="num">${eur(co.rim_fin)}</td></tr>
+      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>= Consumo materie (bilancio)</td><td class="num">${eur(co.consumo)}</td></tr>
+      </tbody></table>
+      <p class="muted" style="margin-top:12px;font-size:12px">Rimanenze <strong>nostre</strong> (ricalcolo): iniz ${eur(no.rim_iniz)} · fin ${eur(no.rim_fin)}<br>Carico merce nostro: ${eur(no.acquisti_carico)}</p>
+      <div class="banner ok" style="margin-top:10px;font-size:12.5px">Il ponte a sinistra parte dal nostro COGS e arriva a questo consumo contabile: ogni scarto è una <strong>riga spiegata</strong> (sfasamento spedizione/fattura, rettifiche, resi, drift apertura). Validazione implicita del costo del venduto.</div>
+      </div></div>`;
+  $("#riconc").innerHTML=h;
+}
+async function ricDrill(k){
+  const row=document.getElementById('ricdet_'+k), box=document.getElementById('ricbox_'+k);
+  if(!row) return;
+  if(row.style.display!=='none'){ row.style.display='none'; return; }
+  document.querySelectorAll('#riconc tr.det').forEach(e=>e.style.display='none');
+  row.style.display=''; box.innerHTML='<p class="muted">Carico…</p>';
+  const {a,m}=window._ricP;
+  const d=await j(`/api/riconciliazione_drill?k=${k}&anno=${a}&mese_da=1&mese_a=${m}`);
+  if(!d || !d.length){ box.innerHTML='<p class="muted">Nessun dettaglio per questa voce.</p>'; return; }
+  const cols=Object.keys(d[0]);
+  const isEuro=c=>/val|cost|cogs|scaric|differ|importo|riacq|magazz|document/i.test(c);
+  const fmt=(c,v)=> (typeof v==='number') ? (isEuro(c)?eur(v):Number(v).toLocaleString('it-IT')) : esc(String(v==null?'':v));
+  let t=`<table class="sticky"><thead><tr>${cols.map(c=>`<th class="${typeof d[0][c]==='number'?'num':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>`;
+  t+=d.map(r=>`<tr>${cols.map(c=>`<td class="${typeof r[c]==='number'?'num':''}">${fmt(c,r[c])}</td>`).join('')}</tr>`).join('');
+  t+=`</tbody></table>`;
+  box.innerHTML=`<div style="max-height:48vh;overflow:auto">${t}</div>`;
 }
 async function aggiornaStatoMese(){
   const {a,m}=periodo(); const mm=`${a}-${String(m).padStart(2,'0')}`;
