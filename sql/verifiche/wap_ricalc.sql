@@ -126,6 +126,17 @@ BEGIN
         SELECT LTRIM(RTRIM(Item)) AS Item, SUM(InitialBookInv) AS q
         FROM KODICEBAGNO_4.dbo.MA_ItemsBalances WHERE FiscalYear = @Anno AND Storage <> 'ATRI' GROUP BY LTRIM(RTRIM(Item))
     ),
+    baln_atri AS (   -- apertura ATRI presa da MA_ItemsBalances SOLO per articoli NON in KLProgUbicazioni
+        -- (es. pool imballi/EPAL: stanno in ATRI a bilancio ma non sono ubicazioni fisiche). Cosi'
+        -- entrano nel magazzino senza fare doppio conteggio degli articoli ATRI gia' presi da 'ubi'.
+        SELECT LTRIM(RTRIM(Item)) AS Item, SUM(InitialBookInv) AS q
+        FROM KODICEBAGNO_4.dbo.MA_ItemsBalances
+        WHERE FiscalYear = @Anno AND Storage = 'ATRI'
+          AND LTRIM(RTRIM(Item)) NOT IN (   -- escludi solo i normali ATRI gia' contati da 'ubi' (qta KLProg > 0)
+              SELECT LTRIM(RTRIM(Articolo)) FROM KODICEBAGNO_4.dbo.KLProgUbicazioni
+              WHERE Esercizio = @Anno GROUP BY LTRIM(RTRIM(Articolo)) HAVING SUM(QtaIniziale) > 0)
+        GROUP BY LTRIM(RTRIM(Item))
+    ),
     seedw AS (   -- ultimo WAPCost>0 prima dell'anno (risalita robusta; NON azzera se l'ultima riga e' 0)
         SELECT Item, WAPCost FROM (
             SELECT LTRIM(RTRIM(Item)) AS Item, WAPCost,
@@ -151,12 +162,12 @@ BEGIN
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = d.EntryId
         WHERE YEAR(h.PostingDate) = @Anno
     ),
-    univ AS (SELECT Item FROM ubi UNION SELECT Item FROM baln UNION SELECT Item FROM mov UNION SELECT Item FROM seedw UNION SELECT Item FROM ovr UNION SELECT Item FROM py)
+    univ AS (SELECT Item FROM ubi UNION SELECT Item FROM baln UNION SELECT Item FROM baln_atri UNION SELECT Item FROM mov UNION SELECT Item FROM seedw UNION SELECT Item FROM ovr UNION SELECT Item FROM py)
     -- Il TOTALE d'apertura resta invariato (override oppure risalita WAP): NON tocca il costo/COGS.
     -- Lo SPLIT puro/oneri pero' viene preso dalla chiusura dell'anno precedente (py): senza, il totale
     -- di risalita finirebbe tutto in 'puro' (oneri=0) generando un falso Q3 "oneri spariti" a inizio anno.
     SELECT u.Item,
-           COALESCE(ov.QtaIniz, ISNULL(ubi.q,0) + ISNULL(baln.q,0)) AS qty,
+           COALESCE(ov.QtaIniz, ISNULL(ubi.q,0) + ISNULL(baln.q,0) + ISNULL(ba.q,0)) AS qty,
            CASE WHEN ov.CostoPuroUnit IS NOT NULL THEN ov.CostoPuroUnit
                 WHEN py.Item IS NOT NULL AND (py.PuroUnit + py.OneriUnit) > 0
                      THEN ISNULL(sw.WAPCost,0) * py.PuroUnit / (py.PuroUnit + py.OneriUnit)
@@ -169,6 +180,7 @@ BEGIN
     FROM univ u
     LEFT JOIN ubi  ON ubi.Item  = u.Item
     LEFT JOIN baln ON baln.Item = u.Item
+    LEFT JOIN baln_atri ba ON ba.Item = u.Item
     LEFT JOIN seedw sw ON sw.Item = u.Item
     LEFT JOIN ovr ov ON ov.Item = u.Item
     LEFT JOIN py ON py.Item = u.Item
