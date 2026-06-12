@@ -109,7 +109,8 @@ SELECT f.Item, f.Anno, f.Mese, f.WAPCost_ricalc, f.PuroUnit, f.OneriUnit, f.QtaF
             CASE WHEN f.ValutaNonConv = 1     THEN ',Q4 valuta non convertita' ELSE '' END +
             CASE WHEN f.Q9_qty_neg = 1        THEN ',Q9 quantita negativa' ELSE '' END +
             CASE WHEN f.Q1_scost_mago = 2     THEN ',Q1 scost. Mago >20%' WHEN f.Q1_scost_mago = 1 THEN ',Q1 scost. Mago >5%' ELSE '' END +
-            CASE WHEN f.Q2_mago_rotto = 1     THEN ',Q2 WAP Mago azzerato (info)' ELSE '' END +
+            -- Q2 (WAP Mago azzerato) e' INFORMATIVO: NON va nella riga di sintesi (rumore). Resta nella
+            -- colonna WAP Mago (=azzerato) e nei numeri della scheda; la colonna Q2_mago_rotto resta per query.
             CASE WHEN f.Q3_oneri_spariti = 1  THEN ',Q3 oneri spariti' ELSE '' END +
             CASE WHEN f.Q5_salto_mom = 1      THEN ',Q5 salto costo MoM' ELSE '' END +
             CASE WHEN f.Q6_acq_diverso = 1    THEN ',Q6 acquisto a prezzo anomalo' ELSE '' END +
