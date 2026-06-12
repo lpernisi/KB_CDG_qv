@@ -191,15 +191,16 @@ BEGIN
         mv AS (
             -- I valori sono convertiti in EUR: LineAmount * Fixing per i movimenti in valuta estera
             -- (h.Fixing = cambio del movimento su MA_InventoryEntries; per EUR Fixing=0 -> nessuna conversione).
-            -- Split per QUANTITA' (come fa MA_ItemsWAP / MA_ItemsWAPTransactions): movimento acquisto CON quantita'
-            -- = costo d'acquisto (puro); SENZA quantita' = valori spalmati (oneri accessori dazi/import + differenze
-            -- cambio, es. causale ACQ-VALD). Riconciliato al centesimo col WAP di Mago.
+            -- Split (come MA_ItemsWAP): movimento acquisto CON quantita' = costo d'acquisto (PURO).
+            -- SENZA quantita' = valori spalmati: ONERI accessori (dazi/import: IMPORT, AGGDAZI) MA la
+            -- differenza CAMBIO sull'acquisto (causale ACQ-VALD) e' parte del costo d'acquisto REALE in EUR
+            -- -> va nel PURO, non negli oneri. Riconciliato al centesimo col WAP di Mago.
             SELECT LTRIM(RTRIM(d.Item)) AS Item,
                    SUM(CASE WHEN h.WAPMovementType = 2032533505 THEN d.Qty ELSE 0 END) AS QtaAcq,
-                   SUM(CASE WHEN h.WAPMovementType = 2032533505 AND d.Qty = 0
+                   SUM(CASE WHEN h.WAPMovementType = 2032533505 AND d.Qty = 0 AND h.InvRsn <> 'ACQ-VALD'
                             THEN d.LineAmount * CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing > 0 THEN h.Fixing ELSE 1 END
                             ELSE 0 END) AS ValAcqOneri,
-                   SUM(CASE WHEN h.WAPMovementType = 2032533505 AND d.Qty <> 0
+                   SUM(CASE WHEN h.WAPMovementType = 2032533505 AND (d.Qty <> 0 OR h.InvRsn = 'ACQ-VALD')
                             THEN d.LineAmount * CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing > 0 THEN h.Fixing ELSE 1 END
                             ELSE 0 END) AS ValAcqPuro,
                    SUM(CASE WHEN h.WAPMovementType = 2032533506 THEN d.Qty ELSE 0 END) AS QtaVend,
