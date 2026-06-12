@@ -66,14 +66,23 @@ riacq AS (   -- costo di RIACQUISTO per Item: StandardPrice del fornitore prefer
     ) x
     GROUP BY Item
 ),
+acq AS (   -- ULTIMO acquisto reale: costo PURO unitario. E' il riferimento COERENTE per il confronto col
+           -- listino (niente apertura ne' oneri): il WAP puro puo' essere "sporcato" dall'apertura da risalita.
+    SELECT Item, PuroAcqUnit FROM (
+        SELECT LTRIM(RTRIM(Item)) AS Item, ValAcqPuro / NULLIF(QtaAcq,0) AS PuroAcqUnit,
+               ROW_NUMBER() OVER (PARTITION BY LTRIM(RTRIM(Item)) ORDER BY Anno DESC, Mese DESC) rn
+        FROM kodice.wap_ricalc WHERE QtaAcq > 0 AND ValAcqPuro > 0
+    ) t WHERE rn = 1
+),
 flags AS (
     SELECT b.*,
            ISNULL(m.ValutaNonConv, 0)     AS ValutaNonConv,
            ISNULL(m.CausaleNonMappata, 0) AS CausaleNonMappata,
-           r.RiacquistoEur,
-           -- Q12 scostamento del COSTO PURO dal costo di riacquisto (listino fornitore, EUR): >25%
-           CASE WHEN r.RiacquistoEur > 0 AND b.PuroUnit > 0
-                 AND ABS(b.PuroUnit - r.RiacquistoEur) > 0.25 * r.RiacquistoEur THEN 1 ELSE 0 END AS Q12_scost_riacq,
+           r.RiacquistoEur, a.PuroAcqUnit,
+           -- Q12 scostamento dal costo di riacquisto (listino fornitore, EUR): confronto con l'ULTIMO
+           -- ACQUISTO PURO reale (non col WAP puro, che l'apertura puo' falsare). >25%. Solo se c'e' un acquisto.
+           CASE WHEN r.RiacquistoEur > 0 AND a.PuroAcqUnit > 0
+                 AND ABS(a.PuroAcqUnit - r.RiacquistoEur) > 0.25 * r.RiacquistoEur THEN 1 ELSE 0 END AS Q12_scost_riacq,
            -- Q1 scostamento vs WAP Mago: 0 nessuno, 1 warn (>5%), 2 alto (>20%)
            CASE WHEN b.WAPCost_Mago > 0 AND ABS(b.WAPCost_ricalc - b.WAPCost_Mago) > 0.20 * b.WAPCost_Mago THEN 2
                 WHEN b.WAPCost_Mago > 0 AND ABS(b.WAPCost_ricalc - b.WAPCost_Mago) > 0.05 * b.WAPCost_Mago THEN 1
@@ -92,11 +101,12 @@ flags AS (
     FROM base b
     LEFT JOIN movflag m ON m.Item = b.Item AND m.Anno = b.Anno AND m.Mese = b.Mese
     LEFT JOIN riacq r   ON r.Item = b.Item
+    LEFT JOIN acq a     ON a.Item = b.Item
 )
 SELECT f.Item, f.Anno, f.Mese, f.WAPCost_ricalc, f.PuroUnit, f.OneriUnit, f.QtaFin, f.WAPCost_Mago,
        f.Q1_scost_mago, f.Q2_mago_rotto, f.Q3_oneri_spariti, f.Q5_salto_mom, f.Q6_acq_diverso,
        f.Q9_qty_neg, f.ValutaNonConv AS Q4_valuta, f.CausaleNonMappata AS Q11_causale,
-       f.Q12_scost_riacq, f.RiacquistoEur,
+       f.Q12_scost_riacq, f.RiacquistoEur, f.PuroAcqUnit,
        -- LIVELLO: ROSSO (bloccante) / GIALLO (da rivedere) / VERDE
        -- Q2 (WAP Mago azzerato) e' INFORMATIVO (Mago rotto, il NOSTRO costo e' quello buono): NON incide sul livello.
        CASE WHEN f.ValutaNonConv = 1 OR f.Q9_qty_neg = 1 THEN 'ROSSO'

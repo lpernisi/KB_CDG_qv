@@ -632,7 +632,7 @@ def api_costo_dettaglio():
     # Indicatori di qualita' dell'ultimo mese disponibile (per mostrarli in testata coi numeri che li generano).
     qual = righe("""
         SELECT TOP 1 Mese, Livello, Flags, PuroUnit, OneriUnit, WAPCost_ricalc, WAPCost_Mago, RiacquistoEur,
-               Q1_scost_mago, Q12_scost_riacq
+               PuroAcqUnit, Q1_scost_mago, Q12_scost_riacq
         FROM kodice.vw_qualita_costo WHERE Item = :i AND Anno = :a ORDER BY Mese DESC""", i=item, a=anno)
     return jsonify({"roll": roll, "eff": (eff[0] if eff else None), "mov": mov,
                     "fornitore": (forn[0] if forn else None), "kit": kit,
@@ -1567,9 +1567,9 @@ function renderCostoDett(d, item, anno){
                 : dot('#2f7d52')+'OK';
       h+=`<div style="margin:6px 0;padding:6px 10px;background:#faf7f0;border:1px solid var(--line);border-radius:8px;font-size:12px">
         <strong>Indicatori di qualità</strong> (mese ${MESI[q.Mese]||q.Mese}): ${liv}
-        <span class="muted"> &nbsp; puro nostro ${eur(q.PuroUnit)} · oneri ${eur(q.OneriUnit)} · WAP Mago ${q.WAPCost_Mago?eur(q.WAPCost_Mago):'azzerato'} · listino riacquisto ${q.RiacquistoEur!=null?eur(q.RiacquistoEur):'—'}</span>`;
-      if(q.Q12_scost_riacq && Number(q.RiacquistoEur)>0){ const dl=Number(q.PuroUnit)-Number(q.RiacquistoEur);
-        h+=`<br><span style="color:#b8780a">▸ Q12 scostamento riacquisto: costo puro nostro <strong>${eur(q.PuroUnit)}</strong> vs listino <strong>${eur(q.RiacquistoEur)}</strong> → Δ ${dl>=0?'+':''}${eur(dl)} (${(100*dl/Number(q.RiacquistoEur)).toFixed(0)}%)</span>`; }
+        <span class="muted"> &nbsp; WAP puro ${eur(q.PuroUnit)} · oneri ${eur(q.OneriUnit)}${q.PuroAcqUnit!=null?` · ultimo acq. puro ${eur(q.PuroAcqUnit)}`:''} · WAP Mago ${q.WAPCost_Mago?eur(q.WAPCost_Mago):'azzerato'} · listino riacquisto ${q.RiacquistoEur!=null?eur(q.RiacquistoEur):'—'}</span>`;
+      if(q.Q12_scost_riacq && Number(q.RiacquistoEur)>0 && q.PuroAcqUnit!=null){ const dl=Number(q.PuroAcqUnit)-Number(q.RiacquistoEur);
+        h+=`<br><span style="color:#b8780a">▸ Q12 scostamento riacquisto: ultimo acquisto puro <strong>${eur(q.PuroAcqUnit)}</strong> vs listino <strong>${eur(q.RiacquistoEur)}</strong> → Δ ${dl>=0?'+':''}${eur(dl)} (${(100*dl/Number(q.RiacquistoEur)).toFixed(0)}%)</span>`; }
       if(Number(q.Q1_scost_mago)>0 && Number(q.WAPCost_Mago)>0){
         h+=`<br><span class="muted">▸ Q1 scost. vs WAP Mago: nostro ${eur(q.WAPCost_ricalc)} vs Mago ${eur(q.WAPCost_Mago)}</span>`; }
       if(q.Flags) h+=`<br><span class="muted">flag: ${esc(q.Flags.replace(/,/g,' · '))}</span>`;
