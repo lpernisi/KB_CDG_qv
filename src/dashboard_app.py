@@ -580,10 +580,21 @@ def api_costo_dettaglio():
     eff = righe("SELECT Fonte, CostoEff, PuroUnit, OneriUnit, ValuationType FROM kodice.vw_costo_eff WHERE Item=:i", i=item)
     # Fornitore preferenziale: SOLO anagrafica di tipo FORNITORE (in MA_CustSupp ci sono anche i clienti;
     # alcuni codici, es. 9998, esistono con entrambi i tipi). CustSuppType 3211265 = fornitore, 3211264 = cliente.
+    # + costo di RIACQUISTO ad oggi = StandardPrice del fornitore preferenziale (MA_ItemSuppliers,
+    #   chiavi Item+Supplier), NETTO sconti: Mago collassa la formula sconti in Discount1+Discount2
+    #   (es. "60+25+5" -> D1=60, D2=28.75), quindi netto = StandardPrice*(1-D1/100)*(1-D2/100).
+    #   E' in valuta del fornitore (colonna Currency, spesso USD): mostrato con la valuta, non convertito.
     forn = righe("""
-        SELECT TOP 1 LTRIM(RTRIM(g.Supplier)) AS Supplier, cs.CompanyName
+        SELECT TOP 1 LTRIM(RTRIM(g.Supplier)) AS Supplier, cs.CompanyName,
+               isup.StandardPrice AS riacquisto_lordo,
+               isup.StandardPrice * (1 - ISNULL(isup.Discount1,0)/100.0) * (1 - ISNULL(isup.Discount2,0)/100.0) AS riacquisto,
+               LTRIM(RTRIM(isup.DiscountFormula)) AS riacquisto_sconti,
+               LTRIM(RTRIM(isup.Currency)) AS riacquisto_valuta,
+               LTRIM(RTRIM(isup.SupplierCode)) AS cod_fornitore
         FROM KODICEBAGNO_4.dbo.MA_ItemsGoodsData g
         LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = g.Supplier AND cs.CustSuppType = 3211265
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_ItemSuppliers isup
+               ON LTRIM(RTRIM(isup.Item)) = LTRIM(RTRIM(g.Item)) AND LTRIM(RTRIM(isup.Supplier)) = LTRIM(RTRIM(g.Supplier))
         WHERE LTRIM(RTRIM(g.Item)) = :i AND g.Supplier IS NOT NULL AND g.Supplier <> ''""", i=item)
     # Distinta esplosa: se l'articolo e' un KIT non ha WAP/movimenti propri, il costo nasce dai componenti.
     # Costo del componente = NOSTRO ricalcolo (wap_ricalc) dell'anno della scheda, ultimo mese con costo>0
@@ -1510,7 +1521,14 @@ function renderCostoDett(d, item, anno){
   h+=`<p><strong>Costo efficace</strong>: ${e?eur(e.CostoEff):'—'}`
      +(e?` <span class="pill">${esc(e.Fonte)}</span> &nbsp; puro ${eur(e.PuroUnit)} + oneri ${eur(e.OneriUnit)}`:'')+`</p>`;
   if(d.fornitore){ const noi=String(d.fornitore.Supplier||'').trim()==='9998';
-    h+=`<p style="margin-top:-6px"><strong>Fornitore preferenziale</strong>: ${esc(d.fornitore.CompanyName||d.fornitore.Supplier)}${d.fornitore.CompanyName?` <span class="muted">(${esc(d.fornitore.Supplier)})</span>`:''}${noi?` <span class="pill">noi · assemblaggio interno</span>`:''}</p>`; }
+    h+=`<p style="margin-top:-6px"><strong>Fornitore preferenziale</strong>: ${esc(d.fornitore.CompanyName||d.fornitore.Supplier)}${d.fornitore.CompanyName?` <span class="muted">(${esc(d.fornitore.Supplier)})</span>`:''}${noi?` <span class="pill">noi · assemblaggio interno</span>`:''}</p>`;
+    const ria=d.fornitore.riacquisto, lordo=d.fornitore.riacquisto_lordo;
+    if(ria!=null && Number(ria)>0){ const cur=(d.fornitore.riacquisto_valuta||'').trim();
+      const fmt=v=> (cur && cur!=='EUR') ? Number(v).toLocaleString('it-IT',{minimumFractionDigits:2,maximumFractionDigits:2})+' '+cur : eur(v);
+      const scontato = lordo!=null && Math.abs(Number(lordo)-Number(ria))>0.005;
+      const dettSconti = scontato ? ` <span class="muted">(lordo ${fmt(lordo)}${d.fornitore.riacquisto_sconti?` − sconti ${esc(d.fornitore.riacquisto_sconti)}`:''})</span>` : '';
+      h+=`<p style="margin-top:-6px"><strong>Costo di riacquisto</strong> (listino fornitore, netto sconti): ${fmt(ria)}${dettSconti} <span class="muted">— prezzo d'acquisto attuale dal fornitore preferenziale${cur&&cur!=='EUR'?', in valuta fornitore (non convertito)':''}</span></p>`; }
+  }
   if((d.kit||[]).length){
     const somma=d.kit.reduce((s,k)=>s+Number(k.Qty||0)*Number(k.costo||0),0);
     h+=`<div class="panel" style="background:#eef3ee;border-color:#cfe0cf;margin:8px 0">
