@@ -706,11 +706,12 @@ def api_cerca_articolo():
 def api_bonifica():
     """Candidati alla bonifica dell'apertura 2026 (kodice.vw_bonifica_apertura)."""
     return jsonify(righe("""
-        SELECT Item, Descrizione, Categoria, Giacenza, CostoSeed, NostroDic2025, MagoDic2025,
+        SELECT Item, Descrizione, Categoria, InRicalcolo, Giacenza, CostoSeed, NostroDic2025, MagoDic2025,
                LastCost, OverrideSuggerito, OverrideAttuale, OverrideFonte
         FROM kodice.vw_bonifica_apertura
         ORDER BY CASE WHEN OverrideAttuale IS NULL THEN 0 ELSE 1 END,
-                 CASE Categoria WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END, Giacenza DESC"""))
+                 InRicalcolo, CASE Categoria WHEN 'A' THEN 0 WHEN 'B' THEN 1 ELSE 2 END,
+                 Giacenza*ISNULL(OverrideSuggerito,0) DESC"""))
 
 
 @app.post("/api/bonifica_certifica")
@@ -732,6 +733,20 @@ def api_bonifica_certifica():
             WHEN NOT MATCHED THEN INSERT (Item,Anno,CostoPuroUnit,Fonte,Nota,Utente,DataStato)
                  VALUES (:i,2026,:c,:f,:n,:u,SYSDATETIME());"""), p)
     return jsonify({"ok": True})
+
+
+@app.post("/api/bonifica_certifica_suggeriti")
+def api_bonifica_certifica_suggeriti():
+    """Certifica IN BLOCCO tutti i candidati 'A' che hanno gia' un valore proposto (LastCost/WAP Mago):
+    sono articoli con giacenza ma senza valore nostro, per cui esiste comunque un costo plausibile.
+    Restano da fare a mano solo quelli SENZA alcun costo (OverrideSuggerito=0 -> da definire)."""
+    with engine.begin() as c:
+        n = c.execute(text("""
+            INSERT INTO kodice.wap_apertura_override (Item, Anno, CostoPuroUnit, Fonte, Nota, Utente, DataStato)
+            SELECT Item, 2026, OverrideSuggerito, 'AUTO_SUGGERITO', 'Bulk: valore proposto (LastCost/WAP)', 'dashboard', SYSDATETIME()
+            FROM kodice.vw_bonifica_apertura
+            WHERE Categoria='A' AND OverrideSuggerito > 0 AND OverrideAttuale IS NULL""")).rowcount
+    return jsonify({"ok": True, "certificati": n})
 
 
 @app.post("/api/rilancia_ricalcolo")
@@ -1508,17 +1523,28 @@ async function costoDett(item, el, anno){
 }
 async function caricaBonifica(){
   const d=await j('/api/bonifica');
-  const a=d.filter(x=>x.Categoria==='A'), b=d.filter(x=>x.Categoria==='B'), cert=d.filter(x=>x.OverrideAttuale!=null);
+  const imp=x=>Number(x.Giacenza||0)*Number(x.OverrideSuggerito||0);
+  const cert=d.filter(x=>x.OverrideAttuale!=null);
+  const daDef=d.filter(x=>x.OverrideAttuale==null && x.Categoria==='A' && !(x.OverrideSuggerito>0)); // nessun costo: decisione manuale
+  const sugg=d.filter(x=>x.OverrideAttuale==null && x.Categoria==='A' && x.OverrideSuggerito>0);      // valore proposto: bulk
+  const catB=d.filter(x=>x.OverrideAttuale==null && x.Categoria==='B');
+  const suggImp=sugg.reduce((s,x)=>s+imp(x),0);
+  // default: mostra solo cio' che richiede una SCELTA (da definire + scostamenti + gia certificati). I 'suggeriti' stanno dietro al bottone.
+  const vis = window._bonifTutti ? d : d.filter(x=> x.OverrideAttuale!=null || x.Categoria==='B' || (x.Categoria==='A' && !(x.OverrideSuggerito>0)));
   let h=`<div class="cards">
-    <div class="kpi"><div class="v">${num(a.length)}</div><div class="l">${dot('#c0392b')}A · apertura senza costo</div></div>
-    <div class="kpi"><div class="v">${num(b.length)}</div><div class="l">${dot('#e0a800')}B · costo da certificare</div></div>
-    <div class="kpi"><div class="v" style="color:#1a7f37">${num(cert.length)}</div><div class="l">${dot('#2f7d52')}certificati</div></div>
-    <div class="kpi"><div class="v">${num(d.length-cert.length)}</div><div class="l">da certificare</div></div></div>
-  <p class="muted">Bonifica dell'apertura 2026. Clicca il <strong>codice</strong> per vedere i <strong>movimenti 2025</strong> da cui nasce il valore proposto. Modifica il valore se serve, poi <em>Certifica</em>. Infine <a href="#" onclick="rilanciaRic();return false"><strong>↻ Applica bonifica (rilancia ricalcolo 2026)</strong></a>.</p>`;
+    <div class="kpi"><div class="v" style="color:#c0392b">${num(daDef.length)}</div><div class="l">da definire (manuale)</div></div>
+    <div class="kpi"><div class="v" style="color:#b8780a">${num(sugg.length)}</div><div class="l">valore proposto (bulk)</div></div>
+    <div class="kpi"><div class="v">${num(catB.length)}</div><div class="l">${dot('#e0a800')}B · scostamento</div></div>
+    <div class="kpi"><div class="v" style="color:#1a7f37">${num(cert.length)}</div><div class="l">${dot('#2f7d52')}certificati</div></div></div>
+  <p class="muted">Universo = <strong>tutto il magazzino</strong> (giacenza Mago, ogni deposito). Non lavori 500 righe a mano: <strong>${num(daDef.length)} richiedono una tua scelta</strong> (giacenza ma nessun costo da nessuna fonte); gli altri hanno gia' un valore proposto. Clicca il <strong>codice</strong> per i movimenti. Poi <a href="#" onclick="rilanciaRic();return false"><strong>↻ Applica bonifica</strong></a>.</p>`;
+  if(sugg.length) h+=`<div class="panel" style="background:#fff8e6;border:1px solid #e0a800;margin-bottom:8px">
+    <strong>${num(sugg.length)} articoli</strong> con giacenza senza valore nostro ma un <strong>costo proposto</strong> (LastCost/WAP Mago) · impatto ~${eur(suggImp)}.
+    <a href="#" onclick="certSuggeritiBulk(${sugg.length});return false"><strong>✓ Certifica tutti i suggeriti</strong></a></div>`;
+  h+=`<p style="margin:4px 0"><a href="#" onclick="window._bonifTutti=${window._bonifTutti?'false':'true'};caricaBonifica();return false">${window._bonifTutti?'« mostra solo da decidere':`mostra tutti i ${num(d.length)} candidati »`}</a></p>`;
   h+=`<div class="panel" style="padding:0"><div style="max-height:72vh;overflow:auto"><table class="sticky"><thead><tr><th>Articolo</th><th>Descrizione</th><th>Cat.</th><th class="num">Giac.</th>
-      <th class="num">Costo seed</th><th class="num">Nostro 2025</th><th class="num">Mago Dic</th><th class="num">LastCost</th>
+      <th class="num">Impatto €</th><th class="num">Nostro 2025</th><th class="num">LastCost</th>
       <th>Valore d'apertura</th><th>Azione</th></tr></thead><tbody>`;
-  h+= d.map(x=>{
+  h+= vis.map(x=>{
     const id=esc(x.Item);
     const cat = x.Categoria==='A'?dot('#c0392b')+'A':(x.Categoria==='B'?dot('#e0a800')+'B':'—');
     const certified = x.OverrideAttuale!=null;
@@ -1527,18 +1553,24 @@ async function caricaBonifica(){
     const az = certified
        ? `<span class="pill ok">certificato</span> · <a href="#" onclick="certifBon('${id}',0,1);return false" class="muted">rimuovi</a>`
        : `<a href="#" onclick="certifBon('${id}',document.getElementById('${iid}').value,0);return false">Certifica</a>`;
-    return `<tr><td><a href="#" onclick="costoDett('${id}',this,2025);return false" title="movimenti 2025"><code>${id}</code></a></td>
+    const manc = x.InRicalcolo===0 ? ` <span class="pill" style="background:#c0392b;color:#fff;font-size:10px">MANCANTE</span>` : '';
+    return `<tr><td><a href="#" onclick="costoDett('${id}',this,2025);return false" title="movimenti 2025"><code>${id}</code></a>${manc}</td>
        <td>${esc((x.Descrizione||'').slice(0,32))}</td><td>${cat}</td>
        <td class="num">${num(x.Giacenza)}</td>
-       <td class="num">${x.CostoSeed?eur(x.CostoSeed):'—'}</td>
-       <td class="num"><strong>${x.NostroDic2025?eur(x.NostroDic2025):'—'}</strong></td>
-       <td class="num">${x.MagoDic2025?eur(x.MagoDic2025):'—'}</td>
+       <td class="num"><strong>${eur(imp(x))}</strong></td>
+       <td class="num">${x.NostroDic2025?eur(x.NostroDic2025):'—'}</td>
        <td class="num">${x.LastCost?eur(x.LastCost):'—'}</td>
        <td><input id="${iid}" value="${val!=null?Number(val).toFixed(2):''}" style="width:78px;text-align:right" ${certified?'disabled':''}></td>
        <td style="font-size:12px;white-space:nowrap">${az}</td></tr>`;
-  }).join("") || `<tr><td colspan="10" class="muted">Nessun candidato.</td></tr>`;
+  }).join("") || `<tr><td colspan="9" class="muted">Nessun candidato.</td></tr>`;
   h+=`</tbody></table></div></div>`;
   $("#bonifica").innerHTML=h;
+}
+async function certSuggeritiBulk(n){
+  if(!confirm('Certifico '+n+' articoli col valore proposto (LastCost / WAP Mago)?\\nResteranno da fare a mano solo quelli senza alcun costo. Potrai sempre rivedere i singoli.')) return;
+  const r=await (await fetch('/api/bonifica_certifica_suggeriti',{method:'POST'})).json();
+  alert('Certificati '+r.certificati+' articoli. Ora applica la bonifica (rilancia ricalcolo) per vederli nelle rimanenze.');
+  caricaBonifica();
 }
 async function certifBon(item, costo, rimuovi){
   if(!rimuovi){

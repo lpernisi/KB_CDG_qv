@@ -350,22 +350,29 @@ GO
 -- =============================================================================
 -- vw_bonifica_apertura — CANDIDATI alla bonifica dell'apertura 2026.
 -- -----------------------------------------------------------------------------
--- Confronta, per articolo con giacenza d'apertura 2026 > 0:
---   CostoSeed     = ultimo WAPCost>0 <= Dic-2025 (cio' che il seed 2026 erediterebbe da Mago)
---   NostroDic2025 = WAPCost del NOSTRO roll 2025 a Dicembre (richiede EXEC usp_ricalc_wap @Anno=2025)
---   MagoDic2025   = WAPCost di Mago a Dic-2025;  LastCost = MA_ItemsBalances.LastCost
--- Categoria A = apertura SENZA costo (CostoSeed=0, giacenza>0) -> priorita'.
--- Categoria B = NostroDic2025 diverge > 15% dal CostoSeed -> costo da certificare (es. 74,62 vs 48,65).
--- Override suggerito = nostro Dic-2025 (se >0) -> LastCost -> Mago. La presenza di una riga in
--- kodice.wap_apertura_override (esposta come override gia' certificato) significa "certificato".
+-- PRINCIPIO (anti-fragilita'): l'universo e' TUTTO il magazzino di Mago, preso dal
+-- dato di giacenza LIVE e DETERMINISTICO (MA_ItemsBalances.BookInv, OGNI deposito;
+-- + fallback KLProgUbicazioni per gli articoli solo-ATRI). NON parte da un report,
+-- da nomi o dagli input del ricalcolo: cosi' OGNI articolo con giacenza emerge per
+-- forza, anche se assente dal nostro wap_ricalc o senza movimenti (es. imballi/EPAL).
+-- Colonne: NostroDic2025 = WAPCost del nostro roll 2025-Dic (= apertura 2026); CostoSeed
+-- = ultimo WAPCost Mago < 2026; MagoDic2025 = WAPCost Mago Dic-2025; LastCost = MA_ItemsBalances.
+--   Categoria A = giacenza SENZA valore nostro (assente dal ricalcolo o NostroDic2025=0) -> priorita'.
+--   Categoria B = NostroDic2025 diverge > 15% dal CostoSeed -> costo da certificare.
+--   InRicalcolo = 0 se l'articolo NON e' nel nostro wap_ricalc (MANCANTE) -> caso piu' grave.
+-- Override suggerito = nostro Dic-2025 (se >0) -> LastCost -> Mago -> 0 (=DA DEFINIRE a mano).
+-- La presenza di una riga in kodice.wap_apertura_override significa "gia' certificato".
 CREATE OR ALTER VIEW kodice.vw_bonifica_apertura AS
-WITH ap AS (
+WITH ap AS (   -- UNIVERSO COMPLETO = tutto il magazzino (ogni deposito), live
     SELECT Item, SUM(q) AS qty FROM (
-        SELECT LTRIM(RTRIM(Articolo)) AS Item, SUM(QtaIniziale) AS q
-        FROM KODICEBAGNO_4.dbo.KLProgUbicazioni WHERE Esercizio = 2026 GROUP BY LTRIM(RTRIM(Articolo))
-        UNION ALL
-        SELECT LTRIM(RTRIM(Item)), SUM(InitialBookInv)
-        FROM KODICEBAGNO_4.dbo.MA_ItemsBalances WHERE FiscalYear = 2026 AND Storage <> 'ATRI' GROUP BY LTRIM(RTRIM(Item))
+        SELECT LTRIM(RTRIM(Item)) AS Item, SUM(BookInv) AS q
+        FROM KODICEBAGNO_4.dbo.MA_ItemsBalances WHERE FiscalYear = 2026 GROUP BY LTRIM(RTRIM(Item))
+        UNION ALL  -- articoli SOLO in ubicazioni ATRI, non presenti in MA_ItemsBalances
+        SELECT LTRIM(RTRIM(Articolo)), SUM(QtaIniziale)
+        FROM KODICEBAGNO_4.dbo.KLProgUbicazioni
+        WHERE Esercizio = 2026 AND LTRIM(RTRIM(Articolo)) NOT IN
+              (SELECT LTRIM(RTRIM(Item)) FROM KODICEBAGNO_4.dbo.MA_ItemsBalances WHERE FiscalYear = 2026)
+        GROUP BY LTRIM(RTRIM(Articolo))
     ) t GROUP BY Item HAVING SUM(q) > 0
 ),
 seed AS (
@@ -381,10 +388,11 @@ lc AS (SELECT LTRIM(RTRIM(Item)) AS Item, MAX(NULLIF(LastCost,0)) AS lastc
        FROM KODICEBAGNO_4.dbo.MA_ItemsBalances WHERE FiscalYear IN (2025,2026) GROUP BY LTRIM(RTRIM(Item))),
 calc AS (
     SELECT ap.Item, i.Description AS Descrizione, ap.qty AS Giacenza,
+           CASE WHEN n.Item IS NULL THEN 0 ELSE 1 END AS InRicalcolo,
            ISNULL(s.WAPCost,0) AS CostoSeed, ISNULL(n.WAPCost_ricalc,0) AS NostroDic2025,
            ISNULL(md.WAPCost,0) AS MagoDic2025, ISNULL(lc.lastc,0) AS LastCost,
-           CASE WHEN ISNULL(s.WAPCost,0) <= 0 THEN 'A'
-                WHEN n.WAPCost_ricalc > 0 AND ABS(n.WAPCost_ricalc - s.WAPCost) > 0.15 * s.WAPCost THEN 'B'
+           CASE WHEN ISNULL(n.WAPCost_ricalc,0) <= 0 THEN 'A'   -- giacenza senza valore nostro (assente o costo 0)
+                WHEN s.WAPCost > 0 AND ABS(n.WAPCost_ricalc - s.WAPCost) > 0.15 * s.WAPCost THEN 'B'
                 ELSE NULL END AS Categoria,
            CASE WHEN ISNULL(n.WAPCost_ricalc,0) > 0 THEN n.WAPCost_ricalc
                 WHEN ISNULL(lc.lastc,0) > 0 THEN lc.lastc
