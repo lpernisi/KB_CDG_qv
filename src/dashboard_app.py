@@ -586,19 +586,19 @@ def api_costo_dettaglio():
         LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = g.Supplier AND cs.CustSuppType = 3211265
         WHERE LTRIM(RTRIM(g.Item)) = :i AND g.Supplier IS NOT NULL AND g.Supplier <> ''""", i=item)
     # Distinta esplosa: se l'articolo e' un KIT non ha WAP/movimenti propri, il costo nasce dai componenti.
-    # Costo del componente: costo certificato piu' recente dell'anno della scheda (costi_articolo_mese);
-    # se l'anno non e' ancora stato preparato (es. 2025), ripiego sul COSTO EFFICACE (vw_costo_eff), cosi'
-    # mostra comunque il numero reale invece di "nessun costo".
+    # Costo del componente = NOSTRO ricalcolo (wap_ricalc) dell'anno della scheda, ultimo mese con costo>0
+    # (es. scheda 2025 -> chiusura ricalcolata 2025: e' il valore giusto per l'APERTURA del 2026).
+    # Ripiego sul COSTO EFFICACE (vw_costo_eff) se per quell'anno non c'e' ricalcolo.
     kit = righe("""
         SELECT LTRIM(RTRIM(b.Component)) AS Item, i.Description AS descr, b.Qty,
-               COALESCE(cm.Costo, ce.CostoEff) AS costo, cm.Mese AS mese_costo,
-               CAST(CASE WHEN cm.Costo IS NULL AND ce.CostoEff IS NOT NULL THEN 1 ELSE 0 END AS bit) AS da_efficace
+               COALESCE(wr.WAPCost_ricalc, ce.CostoEff) AS costo, wr.Mese AS mese_costo,
+               CAST(CASE WHEN wr.WAPCost_ricalc IS NULL AND ce.CostoEff IS NOT NULL THEN 1 ELSE 0 END AS bit) AS da_efficace
         FROM KODICEBAGNO_4.dbo.MA_BillOfMaterialsComp b
         LEFT JOIN KODICEBAGNO_4.dbo.MA_Items i ON LTRIM(RTRIM(i.Item)) = LTRIM(RTRIM(b.Component))
         LEFT JOIN kodice.vw_costo_eff ce ON LTRIM(RTRIM(ce.Item)) = LTRIM(RTRIM(b.Component))
-        OUTER APPLY (SELECT TOP 1 Costo, Mese FROM kodice.costi_articolo_mese
-                     WHERE LTRIM(RTRIM(Item)) = LTRIM(RTRIM(b.Component)) AND Anno = :a
-                     ORDER BY Mese DESC) cm
+        OUTER APPLY (SELECT TOP 1 WAPCost_ricalc, Mese FROM kodice.wap_ricalc
+                     WHERE LTRIM(RTRIM(Item)) = LTRIM(RTRIM(b.Component)) AND Anno = :a AND WAPCost_ricalc > 0
+                     ORDER BY Mese DESC) wr
         WHERE LTRIM(RTRIM(b.BOM)) = :i
         ORDER BY b.Component""", i=item, a=anno)
     mov = righe("""
@@ -1417,7 +1417,7 @@ async function costoDett(item, el, anno){
   const d=await j(`/api/costo_dettaglio?item=${encodeURIComponent(item)}&anno=${a}`);
   const det=document.createElement('tr'); det.className='det';
   const td=document.createElement('td'); td.colSpan=tr.children.length;
-  td.innerHTML=`<div class="dbox" style="font-size:12px;color:var(--muted);margin-bottom:-6px">Movimenti e roll del <strong>${a}</strong></div>`+renderCostoDett(d);
+  td.innerHTML=`<div class="dbox" style="font-size:12px;color:var(--muted);margin-bottom:-6px">Movimenti e roll del <strong>${a}</strong></div>`+renderCostoDett(d, item);
   det.appendChild(td); tr.after(det);
 }
 async function caricaBonifica(){
@@ -1496,9 +1496,15 @@ async function mostraScheda(item){
   $("#ascheda").innerHTML='<p class="muted">Carico…</p>';
   const {a}=periodo();
   const d=await j(`/api/costo_dettaglio?item=${encodeURIComponent(item)}&anno=${a}`);
-  $("#ascheda").innerHTML='<p style="margin:6px 0"><strong>Articolo</strong> <code>'+esc(item)+'</code></p>'+renderCostoDett(d);
+  $("#ascheda").innerHTML='<p style="margin:6px 0"><strong>Articolo</strong> <code>'+esc(item)+'</code></p>'+renderCostoDett(d, item);
 }
-function renderCostoDett(d){
+function kitToBonifica(item, somma){
+  const inp=document.getElementById('bo_'+item.replace(/[^a-zA-Z0-9]/g,'_'));
+  if(!inp){ alert('Apri questa scheda dal tab "Bonifica apertura" per proporre il valore come apertura.'); return; }
+  inp.value=Number(somma).toFixed(2); inp.focus();
+  inp.style.background='#fff7d6'; setTimeout(()=>inp.style.background='',1200);
+}
+function renderCostoDett(d, item){
   const e=d.eff;
   let h=`<div class="dbox">`;
   h+=`<p><strong>Costo efficace</strong>: ${e?eur(e.CostoEff):'—'}`
@@ -1515,7 +1521,9 @@ function renderCostoDett(d){
       <td>${esc((k.descr||'').slice(0,42))}</td><td class="num">${num(k.Qty)}</td>
       <td class="num">${k.costo!=null?eur(k.costo)+(k.da_efficace?' <span class="muted" title="costo efficace (anno scheda non ancora preparato dal motore)">eff.</span>':''):'<span class="muted">— (nessun costo)</span>'}</td>
       <td class="num">${k.costo!=null?eur(Number(k.Qty||0)*Number(k.costo)):'—'}</td></tr>`).join("");
-    h+=`<tr style="font-weight:700;background:#dfeadf"><td colspan="4">Costo del kit (somma componenti)</td><td class="num">${eur(somma)}</td></tr>`;
+    h+=`<tr style="font-weight:700;background:#dfeadf"><td colspan="4">Costo del kit (somma componenti)`
+      +(item?` <a href="#" onclick="kitToBonifica('${esc(item)}',${somma});return false" style="font-weight:600;font-size:12px;margin-left:8px">→ usa ${eur(somma)} come valore d'apertura</a>`:'')
+      +`</td><td class="num">${eur(somma)}</td></tr>`;
     h+=`</tbody></table></div>`;
   }
   h+=`<h3 class="sec">Formazione del WAP mese per mese</h3>
