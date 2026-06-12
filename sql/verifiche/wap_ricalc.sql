@@ -363,9 +363,12 @@ GO
 -- Override suggerito = nostro Dic-2025 (se >0) -> LastCost -> Mago -> 0 (=DA DEFINIRE a mano).
 -- La presenza di una riga in kodice.wap_apertura_override significa "gia' certificato".
 CREATE OR ALTER VIEW kodice.vw_bonifica_apertura AS
-WITH ap AS (   -- UNIVERSO COMPLETO = tutto il magazzino (ogni deposito), live
+WITH ap AS (   -- UNIVERSO = giacenza d'APERTURA 1/1/2026 di TUTTO il magazzino (ogni deposito).
+               -- InitialBookInv (NON BookInv: quello e' la giacenza ATTUALE, include acquisti 2026).
+               -- Cosi' entrano solo gli articoli con stock all'apertura (es. imballi/EPAL in ATRI) ed
+               -- escono quelli con apertura 0 ma comprati nel 2026 (che prendono il costo dei loro acquisti).
     SELECT Item, SUM(q) AS qty FROM (
-        SELECT LTRIM(RTRIM(Item)) AS Item, SUM(BookInv) AS q
+        SELECT LTRIM(RTRIM(Item)) AS Item, SUM(InitialBookInv) AS q
         FROM KODICEBAGNO_4.dbo.MA_ItemsBalances WHERE FiscalYear = 2026 GROUP BY LTRIM(RTRIM(Item))
         UNION ALL  -- articoli SOLO in ubicazioni ATRI, non presenti in MA_ItemsBalances
         SELECT LTRIM(RTRIM(Articolo)), SUM(QtaIniziale)
