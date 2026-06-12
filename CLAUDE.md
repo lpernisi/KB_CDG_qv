@@ -124,6 +124,11 @@ tocca Mago**:
   `SPESEDITRASPORTO` = "Spese di trasporto") con movimenti a quantità negativa, che non sono merce. Filtrati nel seed
   di `usp_ricalc_wap` → niente righe `wap_ricalc`, quindi esclusi anche da `vw_costo_eff`, `vw_qualita_costo` e dal
   report inventario. Per escluderne altri basta inserire una riga (nessuna modifica al codice).
+- **Costo di riacquisto** (confronto): `MA_ItemSuppliers.StandardPrice` del fornitore preferenziale (chiavi Item+Supplier),
+  netto sconti (`Discount1`/`Discount2`, che Mago collassa dalla formula). È in valuta fornitore (`Currency`, spesso USD):
+  convertito in € col cambio BCE. **Cambi BCE** (`kodice.cambio_valuta` + `kodice.vw_cambio_corrente`): popolati da
+  `src/aggiorna_cambi.py` (feed `eurofxref-daily.xml`, indipendente dal fixing di Mago che è spesso fermo), schedulati
+  settimanali con `deploy/installa-cambi.ps1`. Convenzione: `CambioPerEur` = unità di valuta per 1 EUR → EUR = importo / CambioPerEur.
 
 ## Nomi sorgente Mago (CONFERMATI)
 

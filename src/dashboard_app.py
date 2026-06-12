@@ -590,11 +590,19 @@ def api_costo_dettaglio():
                isup.StandardPrice * (1 - ISNULL(isup.Discount1,0)/100.0) * (1 - ISNULL(isup.Discount2,0)/100.0) AS riacquisto,
                LTRIM(RTRIM(isup.DiscountFormula)) AS riacquisto_sconti,
                LTRIM(RTRIM(isup.Currency)) AS riacquisto_valuta,
-               LTRIM(RTRIM(isup.SupplierCode)) AS cod_fornitore
+               LTRIM(RTRIM(isup.SupplierCode)) AS cod_fornitore,
+               -- netto sconti convertito in EUR col cambio BCE corrente (per le valute estere)
+               CASE WHEN isup.Currency IS NULL OR LTRIM(RTRIM(isup.Currency)) IN ('','EUR')
+                     THEN isup.StandardPrice * (1 - ISNULL(isup.Discount1,0)/100.0) * (1 - ISNULL(isup.Discount2,0)/100.0)
+                    WHEN cv.CambioPerEur > 0
+                     THEN isup.StandardPrice * (1 - ISNULL(isup.Discount1,0)/100.0) * (1 - ISNULL(isup.Discount2,0)/100.0) / cv.CambioPerEur
+                    ELSE NULL END AS riacquisto_eur,
+               CONVERT(varchar(10), cv.Data, 103) AS cambio_data
         FROM KODICEBAGNO_4.dbo.MA_ItemsGoodsData g
         LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = g.Supplier AND cs.CustSuppType = 3211265
         LEFT JOIN KODICEBAGNO_4.dbo.MA_ItemSuppliers isup
                ON LTRIM(RTRIM(isup.Item)) = LTRIM(RTRIM(g.Item)) AND LTRIM(RTRIM(isup.Supplier)) = LTRIM(RTRIM(g.Supplier))
+        LEFT JOIN kodice.vw_cambio_corrente cv ON cv.Valuta = LTRIM(RTRIM(isup.Currency))
         WHERE LTRIM(RTRIM(g.Item)) = :i AND g.Supplier IS NOT NULL AND g.Supplier <> ''""", i=item)
     # Distinta esplosa: se l'articolo e' un KIT non ha WAP/movimenti propri, il costo nasce dai componenti.
     # Costo del componente = NOSTRO ricalcolo (wap_ricalc) dell'anno della scheda, ultimo mese con costo>0
@@ -1540,7 +1548,10 @@ function renderCostoDett(d, item, anno){
       const fmt=v=> (cur && cur!=='EUR') ? Number(v).toLocaleString('it-IT',{minimumFractionDigits:2,maximumFractionDigits:2})+' '+cur : eur(v);
       const scontato = lordo!=null && Math.abs(Number(lordo)-Number(ria))>0.005;
       const dettSconti = scontato ? ` <span class="muted">(lordo ${fmt(lordo)}${d.fornitore.riacquisto_sconti?` − sconti ${esc(d.fornitore.riacquisto_sconti)}`:''})</span>` : '';
-      h+=`<p style="margin-top:-6px"><strong>Costo di riacquisto</strong> (listino fornitore, netto sconti): ${fmt(ria)}${dettSconti} <span class="muted">— prezzo d'acquisto attuale dal fornitore preferenziale${cur&&cur!=='EUR'?', in valuta fornitore (non convertito)':''}</span></p>`; }
+      const estera = cur && cur!=='EUR';
+      const eurConv = (estera && d.fornitore.riacquisto_eur!=null)
+          ? ` ≈ <strong>${eur(d.fornitore.riacquisto_eur)}</strong> <span class="muted">(cambio BCE${d.fornitore.cambio_data?' '+esc(d.fornitore.cambio_data):''})</span>` : '';
+      h+=`<p style="margin-top:-6px"><strong>Costo di riacquisto</strong> (listino fornitore, netto sconti): ${fmt(ria)}${eurConv}${dettSconti} <span class="muted">— prezzo d'acquisto attuale dal fornitore preferenziale</span></p>`; }
   }
   if((d.kit||[]).length){
     const somma=d.kit.reduce((s,k)=>s+Number(k.Qty||0)*Number(k.costo||0),0);
