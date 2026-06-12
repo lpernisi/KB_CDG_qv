@@ -586,12 +586,16 @@ def api_costo_dettaglio():
         LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = g.Supplier AND cs.CustSuppType = 3211265
         WHERE LTRIM(RTRIM(g.Item)) = :i AND g.Supplier IS NOT NULL AND g.Supplier <> ''""", i=item)
     # Distinta esplosa: se l'articolo e' un KIT non ha WAP/movimenti propri, il costo nasce dai componenti.
-    # Mostro i componenti diretti col loro costo certificato piu' recente dell'anno (costi_articolo_mese).
+    # Costo del componente: costo certificato piu' recente dell'anno della scheda (costi_articolo_mese);
+    # se l'anno non e' ancora stato preparato (es. 2025), ripiego sul COSTO EFFICACE (vw_costo_eff), cosi'
+    # mostra comunque il numero reale invece di "nessun costo".
     kit = righe("""
         SELECT LTRIM(RTRIM(b.Component)) AS Item, i.Description AS descr, b.Qty,
-               cm.Costo AS costo, cm.Mese AS mese_costo
+               COALESCE(cm.Costo, ce.CostoEff) AS costo, cm.Mese AS mese_costo,
+               CAST(CASE WHEN cm.Costo IS NULL AND ce.CostoEff IS NOT NULL THEN 1 ELSE 0 END AS bit) AS da_efficace
         FROM KODICEBAGNO_4.dbo.MA_BillOfMaterialsComp b
         LEFT JOIN KODICEBAGNO_4.dbo.MA_Items i ON LTRIM(RTRIM(i.Item)) = LTRIM(RTRIM(b.Component))
+        LEFT JOIN kodice.vw_costo_eff ce ON LTRIM(RTRIM(ce.Item)) = LTRIM(RTRIM(b.Component))
         OUTER APPLY (SELECT TOP 1 Costo, Mese FROM kodice.costi_articolo_mese
                      WHERE LTRIM(RTRIM(Item)) = LTRIM(RTRIM(b.Component)) AND Anno = :a
                      ORDER BY Mese DESC) cm
@@ -1509,7 +1513,7 @@ function renderCostoDett(d){
       <table><thead><tr><th>Componente</th><th>Descrizione</th><th class="num">Q.tà</th><th class="num">Costo unit.</th><th class="num">Costo × q.tà</th></tr></thead><tbody>`;
     h+= d.kit.map(k=>`<tr><td><a href="#" onclick="costoDett('${esc(k.Item)}',this);return false"><code>${esc(k.Item)}</code></a></td>
       <td>${esc((k.descr||'').slice(0,42))}</td><td class="num">${num(k.Qty)}</td>
-      <td class="num">${k.costo!=null?eur(k.costo):'<span class="muted">— (nessun costo)</span>'}</td>
+      <td class="num">${k.costo!=null?eur(k.costo)+(k.da_efficace?' <span class="muted" title="costo efficace: l\\'anno della scheda non è ancora stato preparato">eff.</span>':''):'<span class="muted">— (nessun costo)</span>'}</td>
       <td class="num">${k.costo!=null?eur(Number(k.Qty||0)*Number(k.costo)):'—'}</td></tr>`).join("");
     h+=`<tr style="font-weight:700;background:#dfeadf"><td colspan="4">Costo del kit (somma componenti)</td><td class="num">${eur(somma)}</td></tr>`;
     h+=`</tbody></table></div>`;
