@@ -673,11 +673,23 @@ def api_bonifica_certifica():
 
 @app.post("/api/rilancia_ricalcolo")
 def api_rilancia_ricalcolo():
-    """Rilancia il ricalcolo WAP per l'anno indicato (applica le aperture certificate)."""
+    """Rilancia il ricalcolo WAP per l'anno e PROPAGA al costo del venduto: il solo usp_ricalc_wap
+    aggiorna wap_ricalc ma NON costi_articolo_mese/fatto_riga; senza la propagazione la bonifica non
+    si vedrebbe nel COGS. Quindi per ogni mese gia' elaborato (presente in core.fatto_riga) rigenera
+    costi (usp_prepara_costi) -> componenti attivi -> build."""
     anno = int((request.get_json(force=True) or {}).get("anno", 2026))
     with engine.begin() as c:
         c.exec_driver_sql(f"EXEC kodice.usp_ricalc_wap @Anno = {anno};")
-    return jsonify({"ok": True, "anno": anno})
+        mesi = [r[0] for r in c.exec_driver_sql(
+            f"SELECT DISTINCT mese FROM core.fatto_riga WHERE anno = {anno} ORDER BY mese")]
+        attivi = [r[0] for r in c.exec_driver_sql(
+            "SELECT codice_componente FROM cfg.componenti WHERE attivo=1 ORDER BY livello, codice_componente")]
+        for m in mesi:
+            c.exec_driver_sql(f"EXEC core.usp_prepara_costi @schema_azienda='kodice', @anno={anno}, @mese={m};")
+            for cod in attivi:
+                c.exec_driver_sql(f"EXEC dbo.usp_comp_{cod} @anno={anno}, @mese={m};")
+            c.exec_driver_sql(f"EXEC dbo.usp_build_fatto_riga @anno={anno}, @mese={m};")
+    return jsonify({"ok": True, "anno": anno, "mesi": mesi})
 
 
 @app.post("/api/elabora_mese")
@@ -1487,9 +1499,10 @@ async function elaboraMese(){
   aggiornaStatoMese(); sottoVista(SUBV||'qual');
 }
 async function rilanciaRic(){
-  if(!confirm('Rilancio il ricalcolo 2026 con le aperture certificate? (qualche secondo)')) return;
-  await fetch('/api/rilancia_ricalcolo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({anno:2026})});
-  alert('Ricalcolo 2026 completato: i costi sono aggiornati con le aperture bonificate.');
+  if(!confirm('Rilancio il ricalcolo WAP 2026 con le aperture certificate e ricostruisco il costo del venduto dei mesi già elaborati? (qualche secondo)')) return;
+  let r=null;
+  try{ const resp=await fetch('/api/rilancia_ricalcolo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({anno:2026})}); r=await resp.json(); }catch(e){ r=null; }
+  alert(r&&r.ok ? `Ricalcolo 2026 completato e costo del venduto aggiornato per i mesi: ${(r.mesi||[]).join(', ')||'(nessuno elaborato)'}.` : 'Ricalcolo non riuscito: controlla il log del backend.');
   aggiornaStatoMese(); sottoVista(SUBV||'qual');
 }
 let acdeb;
