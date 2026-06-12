@@ -1513,7 +1513,7 @@ function renderCostoDett(d){
       <table><thead><tr><th>Componente</th><th>Descrizione</th><th class="num">Q.tà</th><th class="num">Costo unit.</th><th class="num">Costo × q.tà</th></tr></thead><tbody>`;
     h+= d.kit.map(k=>`<tr><td><a href="#" onclick="costoDett('${esc(k.Item)}',this);return false"><code>${esc(k.Item)}</code></a></td>
       <td>${esc((k.descr||'').slice(0,42))}</td><td class="num">${num(k.Qty)}</td>
-      <td class="num">${k.costo!=null?eur(k.costo)+(k.da_efficace?' <span class="muted" title="costo efficace: l\\'anno della scheda non è ancora stato preparato">eff.</span>':''):'<span class="muted">— (nessun costo)</span>'}</td>
+      <td class="num">${k.costo!=null?eur(k.costo)+(k.da_efficace?' <span class="muted" title="costo efficace (anno scheda non ancora preparato dal motore)">eff.</span>':''):'<span class="muted">— (nessun costo)</span>'}</td>
       <td class="num">${k.costo!=null?eur(Number(k.Qty||0)*Number(k.costo)):'—'}</td></tr>`).join("");
     h+=`<tr style="font-weight:700;background:#dfeadf"><td colspan="4">Costo del kit (somma componenti)</td><td class="num">${eur(somma)}</td></tr>`;
     h+=`</tbody></table></div>`;
