@@ -21,6 +21,8 @@ Lancio:  python src/dashboard_app.py     poi apri  http://127.0.0.1:5000
 from __future__ import annotations
 
 import sys
+import datetime
+import calendar
 from pathlib import Path
 
 # Permette il lancio sia con "python src/dashboard_app.py" sia con "-m".
@@ -696,6 +698,32 @@ def _ric_periodo():
     return anno, mda, ma
 
 
+def _fine_periodo(anno, ma):
+    """Ultimo giorno del mese di chiusura del periodo (per la competenza degli ordini non spediti)."""
+    return datetime.date(anno, ma, calendar.monthrange(anno, ma)[1])
+
+
+# Ordini FATTURATI NON SPEDITI alla chiusura del periodo (competenza). Logica e razionale in
+# sql/verifiche/ordini_non_evasi.sql. Oracolo = VwKLStatoOrdini (CompletamenteConsegnato='No'); per
+# competenza si aggiungono gli ordini ricevuti entro la chiusura ma spediti DOPO (DataSpedizione>fine);
+# si tengono solo gli ordini con FATTURA collegata (B2C: NrOrdine=stringa SaleDocId; B2B: ordine->fattura
+# via MA_CrossReferences, anche col doppio salto via DDT), escludendo gli ordini non ancora fatturati.
+_ORD_NON_SPEDITI_FROM = """
+  FROM kodice.vw_ordini_non_evasi v
+  WHERE v.DataOrdine <= :fine
+    AND (v.CompletamenteConsegnato = 'No' OR v.DataSpedizione > :fine)
+    AND ( EXISTS(SELECT 1 FROM KODICEBAGNO_4.dbo.MA_SaleDoc d
+                 WHERE CAST(d.SaleDocId AS varchar(21)) = v.NrOrdine AND d.DocumentType IN (3407878,3407874))
+       OR EXISTS(SELECT 1 FROM KODICEBAGNO_4.dbo.MA_CrossReferences x
+                 JOIN KODICEBAGNO_4.dbo.MA_SaleDoc d ON d.SaleDocId = x.DerivedDocID AND d.DocumentType IN (3407878,3407874)
+                 WHERE x.OriginDocID = v.IdOrdine)
+       OR EXISTS(SELECT 1 FROM KODICEBAGNO_4.dbo.MA_CrossReferences x1
+                 JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID = x1.DerivedDocID
+                 JOIN KODICEBAGNO_4.dbo.MA_SaleDoc d ON d.SaleDocId = x2.DerivedDocID AND d.DocumentType IN (3407878,3407874)
+                 WHERE x1.OriginDocID = v.IdOrdine) )
+"""
+
+
 @app.get("/api/riconciliazione_cogs")
 def api_riconciliazione_cogs():
     """Prospetto di riconciliazione: dal costo del venduto CDG (abbinato al fatturato) al CONSUMO materie
@@ -738,11 +766,13 @@ def api_riconciliazione_cogs():
         {"n": 8, "k": "apert", "label": "+ Allineamento valorizzazione apertura (drift report Mago)", "val": r((rin_b - rin_n) + (rfin_n - rfin_b)), "drill": True},
         {"n": 9, "k": "bilancio", "label": "= Consumo materie a BILANCIO (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
     ]
+    ord_ns = righe("SELECT COUNT(*) n " + _ORD_NON_SPEDITI_FROM, fine=_fine_periodo(anno, ma))[0]["n"]
     return jsonify({"anno": anno, "mese_da": mda, "mese_a": ma, "righe": righe_out,
                     "contabile": {"acquisti": r(gl_acq), "rim_iniz": r(rin_b), "rim_fin": r(rfin_b),
                                   "var_rim": r(rin_b - rfin_b), "consumo": r(consumo_bil)},
                     "nostro": {"acquisti_carico": r(acq), "rim_iniz": r(rin_n), "rim_fin": r(rfin_n),
-                               "var_rim": r(rin_n - rfin_n)}})
+                               "var_rim": r(rin_n - rfin_n)},
+                    "ord_non_spediti": ord_ns})
 
 
 @app.get("/api/riconciliazione_drill")
@@ -813,6 +843,15 @@ def api_riconciliazione_drill():
             FROM kodice.wap_ricalc w WHERE w.Anno=:a AND w.Mese=:d AND w.QtaIniz>0 AND w.WAPCost_Mago IS NOT NULL
               AND ABS(w.QtaIniz*(ISNULL(w.WAPCost_Mago,0)-w.WAPCost_ricalc))>1
             ORDER BY ABS(w.QtaIniz*(ISNULL(w.WAPCost_Mago,0)-w.WAPCost_ricalc)) DESC""", a=anno, d=mda))
+    if k == "ordnonsped":
+        # Ordini FATTURATI non ancora spediti alla chiusura del periodo (competenza). Lista navigabile:
+        # ogni riga e' un ordine con fattura emessa ma merce non uscita dal magazzino al fine periodo.
+        return jsonify(righe("""
+            SELECT TOP 600 CONVERT(varchar(10), v.DataOrdine, 103) AS data, v.NrOrdine AS ordine,
+                   v.RagioneSocialeCliente AS cliente, v.GruppoCliente AS canale,
+                   v.NrRighe AS righe, v.QtaOrdinata AS qta_ordinata,
+                   CASE WHEN v.CompletamenteConsegnato = 'No' THEN 'backlog' ELSE 'spedito dopo chiusura' END AS stato
+            """ + _ORD_NON_SPEDITI_FROM + " ORDER BY v.DataOrdine DESC", fine=_fine_periodo(anno, ma)))
     return jsonify([])
 
 
@@ -1368,6 +1407,11 @@ async function caricaRiconc(){
       <p class="muted" style="margin-top:12px;font-size:12px">Rimanenze <strong>nostre</strong> (ricalcolo): iniz ${eur(no.rim_iniz)} · fin ${eur(no.rim_fin)}<br>Carico merce nostro: ${eur(no.acquisti_carico)}</p>
       <div class="banner ok" style="margin-top:10px;font-size:12.5px">Il ponte a sinistra parte dal nostro COGS e arriva a questo consumo contabile: ogni scarto è una <strong>riga spiegata</strong> (sfasamento spedizione/fattura, rettifiche, resi, drift apertura). Validazione implicita del costo del venduto.</div>
       </div></div>`;
+  h+=`<div class="panel" style="margin-top:14px">
+      <h2>Ordini fatturati non ancora spediti alla chiusura</h2>
+      <p class="muted">Competenza al periodo (mesi 1–${m}/${a}): <strong>${(d.ord_non_spediti||0).toLocaleString('it-IT')}</strong> ordini con <strong>fattura</strong> emessa (COGS registrato) ma merce non ancora uscita dal magazzino al ${m}/${a}. Per competenza include anche gli ordini spediti <em>dopo</em> la chiusura; esclude gli ordini non ancora fatturati (tipicamente B2B aperti). Fonte: <code>VwKLStatoOrdini</code> (<code>CompletamenteConsegnato='No'</code> + spediti post-chiusura). <a href="#" onclick="ricDrill('ordnonsped');return false">▸ elenco documenti</a></p>
+      <div id="ricdet_ordnonsped" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_ordnonsped"></div></div>
+      </div>`;
   $("#riconc").innerHTML=h;
 }
 async function ricDrill(k){
