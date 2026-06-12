@@ -133,6 +133,14 @@ BEGIN
             FROM KODICEBAGNO_4.dbo.MA_ItemsWAP WHERE Storage = '' AND WAPCost > 0 AND EndPeriodDate < DATEFROMPARTS(@Anno,1,1)
         ) t WHERE rn = 1
     ),
+    py AS (   -- CHIUSURA del ricalcolo dell'ANNO PRECEDENTE (ultimo mese): conserva lo SPLIT puro/oneri
+              -- all'apertura, altrimenti il totale di risalita finirebbe tutto in 'puro' (oneri=0 -> falso Q3).
+        SELECT Item, PuroUnit, OneriUnit FROM (
+            SELECT Item, PuroUnit, OneriUnit,
+                   ROW_NUMBER() OVER (PARTITION BY Item ORDER BY Mese DESC) rn
+            FROM kodice.wap_ricalc WHERE Anno = @Anno - 1
+        ) t WHERE rn = 1
+    ),
     ovr AS (
         SELECT LTRIM(RTRIM(Item)) AS Item, QtaIniz, CostoPuroUnit, CostoOneriUnit
         FROM kodice.wap_apertura_override WHERE Anno = @Anno
@@ -143,17 +151,27 @@ BEGIN
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = d.EntryId
         WHERE YEAR(h.PostingDate) = @Anno
     ),
-    univ AS (SELECT Item FROM ubi UNION SELECT Item FROM baln UNION SELECT Item FROM mov UNION SELECT Item FROM seedw UNION SELECT Item FROM ovr)
+    univ AS (SELECT Item FROM ubi UNION SELECT Item FROM baln UNION SELECT Item FROM mov UNION SELECT Item FROM seedw UNION SELECT Item FROM ovr UNION SELECT Item FROM py)
+    -- Il TOTALE d'apertura resta invariato (override oppure risalita WAP): NON tocca il costo/COGS.
+    -- Lo SPLIT puro/oneri pero' viene preso dalla chiusura dell'anno precedente (py): senza, il totale
+    -- di risalita finirebbe tutto in 'puro' (oneri=0) generando un falso Q3 "oneri spariti" a inizio anno.
     SELECT u.Item,
            COALESCE(ov.QtaIniz, ISNULL(ubi.q,0) + ISNULL(baln.q,0)) AS qty,
-           COALESCE(ov.CostoPuroUnit, ISNULL(sw.WAPCost,0))         AS puro_unit,
-           COALESCE(ov.CostoOneriUnit, 0)                           AS oneri_unit
+           CASE WHEN ov.CostoPuroUnit IS NOT NULL THEN ov.CostoPuroUnit
+                WHEN py.Item IS NOT NULL AND (py.PuroUnit + py.OneriUnit) > 0
+                     THEN ISNULL(sw.WAPCost,0) * py.PuroUnit / (py.PuroUnit + py.OneriUnit)
+                ELSE ISNULL(sw.WAPCost,0) END                       AS puro_unit,
+           CASE WHEN ov.CostoPuroUnit IS NOT NULL THEN ISNULL(ov.CostoOneriUnit, 0)
+                WHEN py.Item IS NOT NULL AND (py.PuroUnit + py.OneriUnit) > 0
+                     THEN ISNULL(sw.WAPCost,0) * py.OneriUnit / (py.PuroUnit + py.OneriUnit)
+                ELSE 0 END                                          AS oneri_unit
     INTO #seed
     FROM univ u
     LEFT JOIN ubi  ON ubi.Item  = u.Item
     LEFT JOIN baln ON baln.Item = u.Item
     LEFT JOIN seedw sw ON sw.Item = u.Item
     LEFT JOIN ovr ov ON ov.Item = u.Item
+    LEFT JOIN py ON py.Item = u.Item
     WHERE NOT EXISTS (SELECT 1 FROM kodice.articoli_esclusi_costo x WHERE x.Item = u.Item);  -- voci di servizio (es. SPESEDITRASPORTO)
 
     DECLARE @m tinyint = 1;
