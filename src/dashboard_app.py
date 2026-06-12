@@ -655,23 +655,37 @@ def api_quadratura_materiale():
         JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account = q.Account
         WHERE q.Componente='MATERIALE' AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :mda AND :ma
         GROUP BY q.Account, q.Ruolo, q.Nota ORDER BY q.Account""", a=anno, mda=mda, ma=ma)
+    # Rimanenze NOSTRE (valorizzazione wap_ricalc) a inizio e fine periodo
     rim = righe("""
         SELECT (SELECT SUM(ValPuroIniz+ValOneriIniz) FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:mda) AS rim_iniz,
                (SELECT SUM(ValPuroFin+ValOneriFin)   FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:ma)  AS rim_fin
     """, a=anno, mda=mda, ma=ma)
+    # Rimanenze CONTABILI (saldi di bilancio MA_ChartOfAccountsBalances, conti RIMANENZE):
+    #   apertura = BalanceType 3145728; saldo a fine mese = apertura + movimenti progressivi (3145730) fino al mese.
+    rim_c = righe("""
+        SELECT
+          (SELECT ISNULL(SUM(b.Debit-b.Credit),0) FROM KODICEBAGNO_4.dbo.MA_ChartOfAccountsBalances b
+             JOIN kodice.conti_quadratura q ON q.Account=b.Account AND q.Componente='MATERIALE' AND q.Ruolo='RIMANENZE'
+            WHERE b.FiscalYear=:a AND b.BalanceType=3145728) AS rim_iniz,
+          (SELECT ISNULL(SUM(b.Debit-b.Credit),0) FROM KODICEBAGNO_4.dbo.MA_ChartOfAccountsBalances b
+             JOIN kodice.conti_quadratura q ON q.Account=b.Account AND q.Componente='MATERIALE' AND q.Ruolo='RIMANENZE'
+            WHERE b.FiscalYear=:a AND (b.BalanceType=3145728 OR (b.BalanceType=3145730 AND b.BalanceMonth BETWEEN 1 AND :ma))) AS rim_fin
+    """, a=anno, ma=ma)
     cogs = righe("SELECT SUM(ricavo_netto-mdc1) AS cogs FROM core.fatto_riga WHERE anno=:a AND mese BETWEEN :mda AND :ma",
                  a=anno, mda=mda, ma=ma)
     fnum = lambda v: float(v or 0)
     acq = sum(fnum(r["importo"]) for r in dett if r["Ruolo"] == "ACQUISTO")
     oneri = sum(fnum(r["importo"]) for r in dett if r["Ruolo"] == "ONERE_ACQUISTO")
-    rim_in = fnum(rim[0]["rim_iniz"] if rim else 0)
-    rim_fin = fnum(rim[0]["rim_fin"] if rim else 0)
+    rin_n = fnum(rim[0]["rim_iniz"] if rim else 0); rfin_n = fnum(rim[0]["rim_fin"] if rim else 0)
+    rin_c = fnum(rim_c[0]["rim_iniz"] if rim_c else 0); rfin_c = fnum(rim_c[0]["rim_fin"] if rim_c else 0)
     nostro = fnum(cogs[0]["cogs"] if cogs else 0)
-    consumo = acq + oneri + rim_in - rim_fin
+    consumo = acq + oneri + rin_c - rfin_c   # consumo CONTABILE (rimanenze a bilancio)
     return jsonify({"anno": anno, "mese_da": mda, "mese_a": ma,
-                    "acquisti": acq, "oneri": oneri, "rim_iniz": rim_in, "rim_fin": rim_fin,
+                    "acquisti": acq, "oneri": oneri,
+                    "rim_iniz_nostra": rin_n, "rim_fin_nostra": rfin_n,
+                    "rim_iniz_cont": rin_c, "rim_fin_cont": rfin_c,
                     "consumo": consumo, "nostro": nostro, "delta": consumo - nostro,
-                    "dettaglio": dett})
+                    "dettaglio": [r for r in dett if r["Ruolo"] != "RIMANENZE"]})
 
 
 @app.get("/api/cerca_articolo")

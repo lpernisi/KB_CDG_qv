@@ -32,7 +32,12 @@ USING (VALUES
     ('MATERIALE','06014001','ONERE_ACQUISTO','Spese scarico container'),
     ('MATERIALE','06014002','ONERE_ACQUISTO','Spese soste container'),
     ('MATERIALE','06015000','ONERE_ACQUISTO','Costo trasporto acquisti/trasferimenti'),
-    ('MATERIALE','06015001','ONERE_ACQUISTO','Costo trasporto trasf. Amazon logistica')
+    ('MATERIALE','06015001','ONERE_ACQUISTO','Costo trasporto trasf. Amazon logistica'),
+    -- RIMANENZE (stato patrimoniale): saldo a bilancio (MA_ChartOfAccountsBalances), NON il GL cumulato.
+    ('MATERIALE','00041000','RIMANENZE','Materie prime, sussidiarie e consumo'),
+    ('MATERIALE','00041100','RIMANENZE','Prodotti in lavorazione, semilavorati'),
+    ('MATERIALE','00041200','RIMANENZE','Lavori in corso su ordinazione'),
+    ('MATERIALE','00041300','RIMANENZE','Prodotti finiti e merci')
 ) AS s (Componente, Account, Ruolo, Nota)
    ON t.Componente = s.Componente AND t.Account = s.Account
 WHEN NOT MATCHED THEN INSERT (Componente, Account, Ruolo, Nota)
