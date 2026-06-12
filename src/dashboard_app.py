@@ -1417,7 +1417,7 @@ async function costoDett(item, el, anno){
   const d=await j(`/api/costo_dettaglio?item=${encodeURIComponent(item)}&anno=${a}`);
   const det=document.createElement('tr'); det.className='det';
   const td=document.createElement('td'); td.colSpan=tr.children.length;
-  td.innerHTML=`<div class="dbox" style="font-size:12px;color:var(--muted);margin-bottom:-6px">Movimenti e roll del <strong>${a}</strong></div>`+renderCostoDett(d, item);
+  td.innerHTML=`<div class="dbox" style="font-size:12px;color:var(--muted);margin-bottom:-6px">Movimenti e roll del <strong>${a}</strong></div>`+renderCostoDett(d, item, a);
   det.appendChild(td); tr.after(det);
 }
 async function caricaBonifica(){
@@ -1496,7 +1496,7 @@ async function mostraScheda(item){
   $("#ascheda").innerHTML='<p class="muted">Carico…</p>';
   const {a}=periodo();
   const d=await j(`/api/costo_dettaglio?item=${encodeURIComponent(item)}&anno=${a}`);
-  $("#ascheda").innerHTML='<p style="margin:6px 0"><strong>Articolo</strong> <code>'+esc(item)+'</code></p>'+renderCostoDett(d, item);
+  $("#ascheda").innerHTML='<p style="margin:6px 0"><strong>Articolo</strong> <code>'+esc(item)+'</code></p>'+renderCostoDett(d, item, a);
 }
 function kitToBonifica(item, somma){
   const inp=document.getElementById('bo_'+item.replace(/[^a-zA-Z0-9]/g,'_'));
@@ -1504,7 +1504,7 @@ function kitToBonifica(item, somma){
   inp.value=Number(somma).toFixed(2); inp.focus();
   inp.style.background='#fff7d6'; setTimeout(()=>inp.style.background='',1200);
 }
-function renderCostoDett(d, item){
+function renderCostoDett(d, item, anno){
   const e=d.eff;
   let h=`<div class="dbox">`;
   h+=`<p><strong>Costo efficace</strong>: ${e?eur(e.CostoEff):'—'}`
@@ -1514,10 +1514,10 @@ function renderCostoDett(d, item){
   if((d.kit||[]).length){
     const somma=d.kit.reduce((s,k)=>s+Number(k.Qty||0)*Number(k.costo||0),0);
     h+=`<div class="panel" style="background:#eef3ee;border-color:#cfe0cf;margin:8px 0">
-      <p style="margin:0 0 6px"><strong>Articolo KIT</strong> — non ha WAP/movimenti di magazzino propri: il costo nasce
-      <strong>esplodendo la distinta</strong> sui costi dei componenti. (Per questo "Costo efficace" e il roll WAP qui sotto risultano vuoti.)</p>
+      <p style="margin:0 0 6px"><strong>Articolo KIT</strong> — il costo nasce <strong>esplodendo la distinta</strong> sui costi dei
+      componenti (nostro ricalcolo ${anno||''}). <span class="muted">Clicca un <strong>componente</strong> per vederne il dettaglio con i movimenti del ${anno||'periodo'}.</span></p>
       <table><thead><tr><th>Componente</th><th>Descrizione</th><th class="num">Q.tà</th><th class="num">Costo unit.</th><th class="num">Costo × q.tà</th></tr></thead><tbody>`;
-    h+= d.kit.map(k=>`<tr><td><a href="#" onclick="costoDett('${esc(k.Item)}',this);return false"><code>${esc(k.Item)}</code></a></td>
+    h+= d.kit.map(k=>`<tr><td><a href="#" onclick="costoDett('${esc(k.Item)}',this,${anno||'undefined'});return false" title="movimenti ${anno||''}"><code>${esc(k.Item)}</code></a></td>
       <td>${esc((k.descr||'').slice(0,42))}</td><td class="num">${num(k.Qty)}</td>
       <td class="num">${k.costo!=null?eur(k.costo)+(k.da_efficace?' <span class="muted" title="costo efficace (anno scheda non ancora preparato dal motore)">eff.</span>':''):'<span class="muted">— (nessun costo)</span>'}</td>
       <td class="num">${k.costo!=null?eur(Number(k.Qty||0)*Number(k.costo)):'—'}</td></tr>`).join("");
