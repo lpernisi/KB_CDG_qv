@@ -639,6 +639,41 @@ def api_costo_dettaglio():
                     "qualita": (qual[0] if qual else None)})
 
 
+@app.get("/api/quadratura_materiale")
+def api_quadratura_materiale():
+    """QUADRATURA CONTABILE del materiale per il periodo: Acquisti (contabilita' generale, conti
+    mappati in kodice.conti_quadratura) + Rimanenze iniziali - Rimanenze finali (nostra valorizzazione
+    wap_ricalc) = Consumo contabile, da confrontare col nostro Sigma costo del venduto (core.fatto_riga)."""
+    anno = int(request.args.get("anno", 2026))
+    mda = int(request.args.get("mese_da", 1))
+    mmax = righe("SELECT MAX(mese) AS m FROM core.fatto_riga WHERE anno=:a", a=anno)
+    ma = int(request.args.get("mese_a") or (mmax[0]["m"] if mmax and mmax[0]["m"] else 12))
+    dett = righe("""
+        SELECT q.Account, q.Ruolo, q.Nota,
+               ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS importo
+        FROM kodice.conti_quadratura q
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account = q.Account
+        WHERE q.Componente='MATERIALE' AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :mda AND :ma
+        GROUP BY q.Account, q.Ruolo, q.Nota ORDER BY q.Account""", a=anno, mda=mda, ma=ma)
+    rim = righe("""
+        SELECT (SELECT SUM(ValPuroIniz+ValOneriIniz) FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:mda) AS rim_iniz,
+               (SELECT SUM(ValPuroFin+ValOneriFin)   FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:ma)  AS rim_fin
+    """, a=anno, mda=mda, ma=ma)
+    cogs = righe("SELECT SUM(ricavo_netto-mdc1) AS cogs FROM core.fatto_riga WHERE anno=:a AND mese BETWEEN :mda AND :ma",
+                 a=anno, mda=mda, ma=ma)
+    fnum = lambda v: float(v or 0)
+    acq = sum(fnum(r["importo"]) for r in dett if r["Ruolo"] == "ACQUISTO")
+    oneri = sum(fnum(r["importo"]) for r in dett if r["Ruolo"] == "ONERE_ACQUISTO")
+    rim_in = fnum(rim[0]["rim_iniz"] if rim else 0)
+    rim_fin = fnum(rim[0]["rim_fin"] if rim else 0)
+    nostro = fnum(cogs[0]["cogs"] if cogs else 0)
+    consumo = acq + oneri + rim_in - rim_fin
+    return jsonify({"anno": anno, "mese_da": mda, "mese_a": ma,
+                    "acquisti": acq, "oneri": oneri, "rim_iniz": rim_in, "rim_fin": rim_fin,
+                    "consumo": consumo, "nostro": nostro, "delta": consumo - nostro,
+                    "dettaglio": dett})
+
+
 @app.get("/api/cerca_articolo")
 def api_cerca_articolo():
     """Ricerca articolo (codice o descrizione) per aprire la scheda costo di QUALUNQUE articolo."""
