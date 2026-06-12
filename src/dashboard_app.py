@@ -755,22 +755,38 @@ def api_riconciliazione_drill():
             ROUND(SUM(ricavo_netto-mdc1),2) AS valore FROM core.fatto_riga
             WHERE anno=:a AND mese BETWEEN :d AND :h AND tipo_articolo='MERCE'
             GROUP BY codice_articolo HAVING SUM(ricavo_netto-mdc1)<>0 ORDER BY SUM(ricavo_netto-mdc1) DESC""", a=anno, d=mda, h=ma))
-    if k in ("sped", "fisico"):
-        # per articolo: scarico vendite 506 a costo certificato vs COGS documento
+    if k == "fisico":
+        # costo del venduto fisico = scarico vendite 506 per articolo (componenti per i kit), a costo certificato
         return jsonify(righe("""
-            WITH scar AS (
-                SELECT LTRIM(RTRIM(d.Item)) AS Item, SUM(d.Qty*ISNULL(cm.Costo,0)) AS v506
+            SELECT TOP 300 LTRIM(RTRIM(d.Item)) AS Item, ROUND(SUM(d.Qty),0) AS qta_spedita,
+                   ROUND(SUM(d.Qty*ISNULL(cm.Costo,0)),2) AS valore
+            FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
+            LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=LTRIM(RTRIM(d.Item)) AND cm.Anno=:a AND cm.Mese=MONTH(h.PostingDate)
+            WHERE h.WAPMovementType=2032533506 AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+            GROUP BY LTRIM(RTRIM(d.Item)) HAVING ABS(SUM(d.Qty*ISNULL(cm.Costo,0)))>1
+            ORDER BY SUM(d.Qty*ISNULL(cm.Costo,0)) DESC""", a=anno, d=mda, h=ma))
+    if k == "sped":
+        # spedito-non-fatturato PER ARTICOLO, ribaltando i componenti sul KIT venduto:
+        # spedito (scarico 506) vs fatturato-equivalente (vendita diretta + come componente di kit venduti).
+        return jsonify(righe("""
+            WITH ship AS (
+                SELECT LTRIM(RTRIM(d.Item)) AS Item, SUM(d.Qty) AS qty, MAX(cm.Costo) AS costo
                 FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
                 JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
                 LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=LTRIM(RTRIM(d.Item)) AND cm.Anno=:a AND cm.Mese=MONTH(h.PostingDate)
                 WHERE h.WAPMovementType=2032533506 AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
                 GROUP BY LTRIM(RTRIM(d.Item))),
-            doc AS (SELECT codice_articolo AS Item, SUM(ricavo_netto-mdc1) AS cogs FROM core.fatto_riga
-                    WHERE anno=:a AND mese BETWEEN :d AND :h GROUP BY codice_articolo)
-            SELECT TOP 300 s.Item, ROUND(s.v506,2) AS scarico_magazzino, ROUND(ISNULL(doc.cogs,0),2) AS cogs_documento,
-                   ROUND(s.v506-ISNULL(doc.cogs,0),2) AS differenza
-            FROM scar s LEFT JOIN doc ON doc.Item=s.Item
-            WHERE ABS(s.v506-ISNULL(doc.cogs,0)) > 1 ORDER BY ABS(s.v506-ISNULL(doc.cogs,0)) DESC""", a=anno, d=mda, h=ma))
+            fr AS (SELECT codice_articolo AS cod, SUM(quantita) AS q FROM core.fatto_riga
+                   WHERE anno=:a AND mese BETWEEN :d AND :h GROUP BY codice_articolo),
+            own AS (SELECT cod AS Item, q FROM fr),
+            kitimp AS (SELECT dd.Component AS Item, SUM(dd.Qty*fr.q) AS q FROM kodice.vw_distinta dd JOIN fr ON fr.cod=dd.BOM GROUP BY dd.Component)
+            SELECT TOP 300 s.Item, ROUND(s.qty,0) AS spedito_qta,
+                   ROUND(ISNULL(o.q,0)+ISNULL(ki.q,0),0) AS fatturato_qta_incl_kit,
+                   ROUND((s.qty-(ISNULL(o.q,0)+ISNULL(ki.q,0)))*ISNULL(s.costo,0),2) AS differenza
+            FROM ship s LEFT JOIN own o ON o.Item=s.Item LEFT JOIN kitimp ki ON ki.Item=s.Item
+            WHERE ABS((s.qty-(ISNULL(o.q,0)+ISNULL(ki.q,0)))*ISNULL(s.costo,0))>1
+            ORDER BY ABS((s.qty-(ISNULL(o.q,0)+ISNULL(ki.q,0)))*ISNULL(s.costo,0)) DESC""", a=anno, d=mda, h=ma))
     if k in ("rett", "resi"):
         tipo = 2032533507 if k == "rett" else 2032533509
         return jsonify(righe("""SELECT TOP 300 h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item,
