@@ -47,10 +47,33 @@ movflag AS (   -- flag per (Item, Anno, Mese) dai MOVIMENTI: valuta non converti
     JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = d.EntryId
     GROUP BY LTRIM(RTRIM(d.Item)), YEAR(h.PostingDate), MONTH(h.PostingDate)
 ),
+riacq AS (   -- costo di RIACQUISTO per Item: StandardPrice del fornitore preferenziale, NETTO sconti,
+             -- convertito in EUR col cambio BCE. NB: il listino fornitore e' solo costo d'acquisto PURO
+             -- (niente oneri accessori) -> si confronta con PuroUnit, non col costo totale.
+    SELECT Item, MAX(RiacquistoEur) AS RiacquistoEur
+    FROM (
+        SELECT LTRIM(RTRIM(g.Item)) AS Item,
+               CASE WHEN isup.Currency IS NULL OR LTRIM(RTRIM(isup.Currency)) IN ('','EUR')
+                     THEN isup.StandardPrice*(1-ISNULL(isup.Discount1,0)/100.0)*(1-ISNULL(isup.Discount2,0)/100.0)
+                    WHEN cv.CambioPerEur > 0
+                     THEN isup.StandardPrice*(1-ISNULL(isup.Discount1,0)/100.0)*(1-ISNULL(isup.Discount2,0)/100.0)/cv.CambioPerEur
+                    ELSE NULL END AS RiacquistoEur
+        FROM KODICEBAGNO_4.dbo.MA_ItemsGoodsData g
+        JOIN KODICEBAGNO_4.dbo.MA_ItemSuppliers isup
+              ON LTRIM(RTRIM(isup.Item)) = LTRIM(RTRIM(g.Item)) AND LTRIM(RTRIM(isup.Supplier)) = LTRIM(RTRIM(g.Supplier))
+        LEFT JOIN kodice.vw_cambio_corrente cv ON cv.Valuta = LTRIM(RTRIM(isup.Currency))
+        WHERE g.Supplier IS NOT NULL AND g.Supplier <> '' AND isup.StandardPrice > 0
+    ) x
+    GROUP BY Item
+),
 flags AS (
     SELECT b.*,
            ISNULL(m.ValutaNonConv, 0)     AS ValutaNonConv,
            ISNULL(m.CausaleNonMappata, 0) AS CausaleNonMappata,
+           r.RiacquistoEur,
+           -- Q12 scostamento del COSTO PURO dal costo di riacquisto (listino fornitore, EUR): >25%
+           CASE WHEN r.RiacquistoEur > 0 AND b.PuroUnit > 0
+                 AND ABS(b.PuroUnit - r.RiacquistoEur) > 0.25 * r.RiacquistoEur THEN 1 ELSE 0 END AS Q12_scost_riacq,
            -- Q1 scostamento vs WAP Mago: 0 nessuno, 1 warn (>5%), 2 alto (>20%)
            CASE WHEN b.WAPCost_Mago > 0 AND ABS(b.WAPCost_ricalc - b.WAPCost_Mago) > 0.20 * b.WAPCost_Mago THEN 2
                 WHEN b.WAPCost_Mago > 0 AND ABS(b.WAPCost_ricalc - b.WAPCost_Mago) > 0.05 * b.WAPCost_Mago THEN 1
@@ -68,15 +91,18 @@ flags AS (
            CASE WHEN b.QtaFin < 0 THEN 1 ELSE 0 END AS Q9_qty_neg
     FROM base b
     LEFT JOIN movflag m ON m.Item = b.Item AND m.Anno = b.Anno AND m.Mese = b.Mese
+    LEFT JOIN riacq r   ON r.Item = b.Item
 )
 SELECT f.Item, f.Anno, f.Mese, f.WAPCost_ricalc, f.PuroUnit, f.OneriUnit, f.QtaFin, f.WAPCost_Mago,
        f.Q1_scost_mago, f.Q2_mago_rotto, f.Q3_oneri_spariti, f.Q5_salto_mom, f.Q6_acq_diverso,
        f.Q9_qty_neg, f.ValutaNonConv AS Q4_valuta, f.CausaleNonMappata AS Q11_causale,
+       f.Q12_scost_riacq, f.RiacquistoEur,
        -- LIVELLO: ROSSO (bloccante) / GIALLO (da rivedere) / VERDE
        -- Q2 (WAP Mago azzerato) e' INFORMATIVO (Mago rotto, il NOSTRO costo e' quello buono): NON incide sul livello.
        CASE WHEN f.ValutaNonConv = 1 OR f.Q9_qty_neg = 1 THEN 'ROSSO'
             WHEN f.Q1_scost_mago >= 1 OR f.Q3_oneri_spariti = 1
-                 OR f.Q5_salto_mom = 1 OR f.Q6_acq_diverso = 1 OR f.CausaleNonMappata = 1 THEN 'GIALLO'
+                 OR f.Q5_salto_mom = 1 OR f.Q6_acq_diverso = 1 OR f.CausaleNonMappata = 1
+                 OR f.Q12_scost_riacq = 1 THEN 'GIALLO'
             ELSE 'VERDE' END AS Livello,
        -- elenco compatto dei flag attivi
        STUFF(
@@ -87,7 +113,8 @@ SELECT f.Item, f.Anno, f.Mese, f.WAPCost_ricalc, f.PuroUnit, f.OneriUnit, f.QtaF
             CASE WHEN f.Q3_oneri_spariti = 1  THEN ',Q3 oneri spariti' ELSE '' END +
             CASE WHEN f.Q5_salto_mom = 1      THEN ',Q5 salto costo MoM' ELSE '' END +
             CASE WHEN f.Q6_acq_diverso = 1    THEN ',Q6 acquisto a prezzo anomalo' ELSE '' END +
-            CASE WHEN f.CausaleNonMappata = 1 THEN ',Q11 causale non mappata' ELSE '' END,
+            CASE WHEN f.CausaleNonMappata = 1 THEN ',Q11 causale non mappata' ELSE '' END +
+            CASE WHEN f.Q12_scost_riacq = 1   THEN ',Q12 scost. dal riacquisto >25%' ELSE '' END,
             1, 1, '') AS Flags,
        c.Stato, c.Nota, c.Utente, c.DataStato
 FROM flags f

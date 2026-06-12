@@ -1551,7 +1551,14 @@ function renderCostoDett(d, item, anno){
       const estera = cur && cur!=='EUR';
       const eurConv = (estera && d.fornitore.riacquisto_eur!=null)
           ? ` ≈ <strong>${eur(d.fornitore.riacquisto_eur)}</strong> <span class="muted">(cambio BCE${d.fornitore.cambio_data?' '+esc(d.fornitore.cambio_data):''})</span>` : '';
-      h+=`<p style="margin-top:-6px"><strong>Costo di riacquisto</strong> (listino fornitore, netto sconti): ${fmt(ria)}${eurConv}${dettSconti} <span class="muted">— prezzo d'acquisto attuale dal fornitore preferenziale</span></p>`; }
+      h+=`<p style="margin-top:-6px"><strong>Costo di riacquisto</strong> (listino fornitore, netto sconti): ${fmt(ria)}${eurConv}${dettSconti} <span class="muted">— prezzo d'acquisto attuale dal fornitore preferenziale</span></p>`;
+      // Confronto col COSTO PURO (gli oneri accessori dazi/trasporti NON sono nel listino fornitore).
+      const rqe=d.fornitore.riacquisto_eur;
+      if(e && Number(e.PuroUnit)>0 && rqe!=null && Number(rqe)>0){
+        const puro=Number(e.PuroUnit), dl=puro-Number(rqe), pc=100*dl/Number(rqe);
+        const colr = Math.abs(pc)<10?'var(--muted)':(Math.abs(pc)<25?'#b8780a':'#c0392b');
+        h+=`<p style="margin-top:-6px;font-size:12px;color:${colr}">↳ vs <strong>costo puro</strong> nostro ${eur(puro)}: Δ ${dl>=0?'+':''}${eur(dl)} (${pc>=0?'+':''}${pc.toFixed(1)}%) <span class="muted">— confronto col solo puro, gli oneri accessori non sono nel listino</span></p>`;
+      } }
   }
   if((d.kit||[]).length){
     const somma=d.kit.reduce((s,k)=>s+Number(k.Qty||0)*Number(k.costo||0),0);
