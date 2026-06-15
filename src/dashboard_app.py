@@ -724,46 +724,10 @@ _ORD_NON_SPEDITI_FROM = """
 """
 
 
-# Legame carico merce -> bolla -> fattura per la "competenza acquisti". Ogni carico di merce (mov. 505 KLACQ-OA)
-# risale alla BOLLA (in CrossReferences la bolla 9830400 e' Origin del movimento) e da li' alla FATTURA (la bolla
-# e' Origin anche della fattura 9830401). Bucket per DATA FATTURA: separa il "ricevuto non fatturato" reale (merce
-# entrata, fattura dopo il periodo o assente: deve essere piccolo) dallo sfasamento di confine (fattura gia'
-# registrata in un periodo precedente). NB: ACQ-VALD (rivalutazione cambio) e' escluso qui e confluisce nel residuo.
-_ACQ_CTE = """
-    WITH carico AS (
-        SELECT h.EntryId, MIN(CAST(h.PostingDate AS date)) MovDate,
-               SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END) val
-        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
-        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
-        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
-        WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
-          AND h.CancelPhase1='0' AND h.CancelPhase2='0'
-          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
-        GROUP BY h.EntryId),
-    m2b AS (SELECT DISTINCT c.EntryId, c.MovDate, x.OriginDocID AS BollaId
-            FROM carico c JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x ON x.DerivedDocID=c.EntryId
-            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc b ON b.PurchaseDocId=x.OriginDocID AND b.DocumentType=9830400),
-    -- DATA DI COMPETENZA della fattura = AccrualDate della registrazione contabile (NON la data del PurchaseDoc:
-    -- es. Bertoli prot. 000801 ha DocumentDate giugno ma AccrualDate maggio -> DENTRO il periodo). L'header
-    -- MA_JournalEntries non e' interrogabile per CRRefID (tabella enorme non indicizzata -> timeout): prendo
-    -- l'AccrualDate partendo dal GLDetail filtrato per CONTO MERCE (veloce) e risalgo all'header per JournalEntryId (PK).
-    fattacc AS (
-        SELECT je.CRRefID AS FattId, MIN(CAST(g.AccrualDate AS date)) AS Accrual
-        FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
-        JOIN kodice.conti_quadratura q ON q.Account=g.Account AND q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO'
-        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId AND je.CRRefType=27066402
-        WHERE g.AccrualDate >= DATEFROMPARTS(:a - 1, 1, 1)
-        GROUP BY je.CRRefID),
-    -- bolla->fattura SOLO via derivazione vera (CrossRef DerivedDocType 27066402); periodo per AccrualDate.
-    b2f AS (SELECT DISTINCT m.EntryId, m.MovDate, fa.Accrual AS FattDate
-            FROM m2b m JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID=m.BollaId AND x2.DerivedDocType=27066402
-            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc f ON f.PurchaseDocId=x2.DerivedDocID AND f.DocumentType=9830401
-            JOIN fattacc fa ON fa.FattId=f.PurchaseDocId
-            WHERE ABS(DATEDIFF(day, m.MovDate, fa.Accrual)) <= 365),
-    -- fattura collegata = la PIU' ANTICA entro l'anno (la fattura d'origine della merce, non una coincidenza in-periodo)
-    fr AS (SELECT EntryId, FattDate, ROW_NUMBER() OVER (PARTITION BY EntryId ORDER BY FattDate) rn FROM b2f),
-    cf AS (SELECT c.EntryId, c.val, fr.FattDate FROM carico c LEFT JOIN fr ON fr.EntryId=c.EntryId AND fr.rn=1)
-"""
+# Legame carico merce -> bolla -> fattura (con AccrualDate) MATERIALIZZATO in kodice.carico_fattura
+# (proc kodice.usp_build_carico_fattura, file sql/verifiche/link_documenti.sql): cosi' l'endpoint non rifa'
+# il grafo CrossReferences a ogni caricamento. Colonne: MovEntryId, MovDate, ValPuro (carico merce prodotti),
+# FattId, FattAccrual (competenza contabile della fattura, NULL = nessuna fattura). Bucket per FattAccrual.
 
 # Giroconti/scritture sui conti materiale SENZA documento dietro (la fattura giustifica il conto; queste no):
 # registrazioni su 06011000/oneri il cui movimento contabile non si lega ad alcun MA_PurchaseDoc.
@@ -779,11 +743,12 @@ def _ric_acq(anno, mda, ma):
     giroconti senza documento. Vedi _ACQ_CTE."""
     fn = lambda v: float(v or 0)
     ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
-    b = righe(_ACQ_CTE + """
-        SELECT ISNULL(SUM(CASE WHEN cf.FattDate IS NULL THEN cf.val END),0) nofatt,
-               ISNULL(SUM(CASE WHEN cf.FattDate < :ini THEN cf.val END),0) prec,
-               ISNULL(SUM(CASE WHEN cf.FattDate >= :fin1 THEN cf.val END),0) dopo
-        FROM cf OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, ini=ini, fin1=fin1)[0]
+    b = righe("""
+        SELECT ISNULL(SUM(CASE WHEN FattAccrual IS NULL THEN ValPuro END),0) nofatt,
+               ISNULL(SUM(CASE WHEN FattAccrual < :ini THEN ValPuro END),0) prec,
+               ISNULL(SUM(CASE WHEN FattAccrual >= :fin1 THEN ValPuro END),0) dopo
+        FROM kodice.carico_fattura
+        WHERE Anno=:a AND MovDate>=:ini AND MovDate<:fin1""", a=anno, ini=ini, fin1=fin1)[0]
     glnodoc = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
         FROM kodice.conti_quadratura q
         JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
@@ -1074,23 +1039,23 @@ def api_riconciliazione_drill():
             GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma), resi_tot))
     if k in ("ricnf_prec", "ricnf_dopo", "ricnf_nofatt"):
-        # Carico merce per FORNITORE, bucketizzato per data fattura (risalita bolla->fattura, vedi _ACQ_CTE).
-        # prec=fattura registrata prima del periodo; dopo=fattura dopo il periodo; nofatt=nessuna fattura collegata.
+        # Carico merce per FORNITORE dalla tabella materializzata kodice.carico_fattura, bucket per AccrualDate
+        # della fattura: prec=competenza prima del periodo; dopo=dopo il periodo; nofatt=nessuna fattura collegata.
         ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
-        cond = {"ricnf_prec": "cf.FattDate < :ini",
-                "ricnf_dopo": "cf.FattDate >= :fin1",
-                "ricnf_nofatt": "cf.FattDate IS NULL"}[k]
-        rows = righe(_ACQ_CTE + """
+        cond = {"ricnf_prec": "cf.FattAccrual < :ini",
+                "ricnf_dopo": "cf.FattAccrual >= :fin1",
+                "ricnf_nofatt": "cf.FattAccrual IS NULL"}[k]
+        rows = righe("""
             SELECT TOP 300 ISNULL(cs.CompanyName, h.CustSupp) AS fornitore,
-                   CONVERT(varchar(10), CAST(MIN(h.PostingDate) AS date), 103) AS carico,
-                   MAX(CONVERT(varchar(10), cf.FattDate, 103)) AS fattura,
-                   ROUND(-SUM(cf.val), 2) AS valore
-            FROM cf
-            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=cf.EntryId
+                   CONVERT(varchar(10), cf.MovDate, 103) AS carico,
+                   CONVERT(varchar(10), cf.FattAccrual, 103) AS fattura_competenza,
+                   ROUND(-SUM(cf.ValPuro), 2) AS valore
+            FROM kodice.carico_fattura cf
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=cf.MovEntryId
             LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=h.CustSupp
-            WHERE """ + cond + """
-            GROUP BY ISNULL(cs.CompanyName, h.CustSupp)
-            ORDER BY ABS(SUM(cf.val)) DESC OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, ini=ini, fin1=fin1)
+            WHERE cf.Anno=:a AND cf.MovDate>=:ini AND cf.MovDate<:fin1 AND """ + cond + """
+            GROUP BY ISNULL(cs.CompanyName, h.CustSupp), cf.MovDate, cf.FattAccrual
+            ORDER BY ABS(SUM(cf.ValPuro)) DESC""", a=anno, ini=ini, fin1=fin1)
         ab = _ric_acq(anno, mda, ma)
         tot = {"ricnf_prec": -ab["prec"], "ricnf_dopo": -ab["dopo"], "ricnf_nofatt": -ab["nofatt"]}[k]
         return jsonify(_con_resto(rows, tot))

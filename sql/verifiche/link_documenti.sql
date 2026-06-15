@@ -182,3 +182,63 @@ BEGIN
     OPTION (MAXDOP 1);
 END
 GO
+
+-- =============================================================================
+-- kodice.carico_fattura  — materializza il legame CARICO MERCE -> BOLLA -> FATTURA
+-- con la DATA DI COMPETENZA della fattura (AccrualDate). Evita di rifare il grafo
+-- CrossReferences (lento) a ogni caricamento della riconciliazione.
+--   * carico = movimenti 505 KLACQ-OA, SOLO PRODOTTI (ItemType<>997), non annullati;
+--   * bolla  = CrossRef (bolla 9830400 = Origin del movimento);
+--   * fattura= CrossRef DerivedDocType 27066402 (derivazione VERA bolla->fattura acquisto);
+--   * AccrualDate della fattura presa dal GLDetail (conto merce) risalendo all'header per PK;
+--   * fattura scelta = la PIU' ANTICA entro +/-1 anno dal carico.
+-- =============================================================================
+IF OBJECT_ID('kodice.carico_fattura', 'U') IS NOT NULL DROP TABLE kodice.carico_fattura;
+GO
+CREATE TABLE kodice.carico_fattura (
+    Anno         smallint NOT NULL,
+    MovEntryId   int      NOT NULL,
+    MovDate      date     NULL,
+    ValPuro      float    NULL,        -- valore carico merce PRODOTTI (KLACQ-OA, EUR)
+    FattId       int      NULL,
+    FattAccrual  date     NULL,        -- competenza contabile della fattura collegata (NULL = nessuna fattura)
+    CONSTRAINT PK_carico_fattura PRIMARY KEY (MovEntryId)
+);
+GO
+CREATE OR ALTER PROCEDURE kodice.usp_build_carico_fattura
+    @Anno smallint
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DELETE FROM kodice.carico_fattura WHERE Anno = @Anno;
+
+    ;WITH carico AS (
+        SELECT h.EntryId, MIN(CAST(h.PostingDate AS date)) MovDate,
+               SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END) val
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+        WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+          AND h.CancelPhase1='0' AND h.CancelPhase2='0' AND YEAR(h.PostingDate)=@Anno
+        GROUP BY h.EntryId),
+    m2b AS (SELECT DISTINCT c.EntryId, c.MovDate, x.OriginDocID AS BollaId
+            FROM carico c JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x ON x.DerivedDocID=c.EntryId
+            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc b ON b.PurchaseDocId=x.OriginDocID AND b.DocumentType=9830400),
+    fattacc AS (SELECT je.CRRefID AS FattId, MIN(CAST(g.AccrualDate AS date)) Accrual
+            FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+            JOIN kodice.conti_quadratura q ON q.Account=g.Account AND q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO'
+            JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId AND je.CRRefType=27066402
+            WHERE g.AccrualDate >= DATEFROMPARTS(@Anno-1,1,1)
+            GROUP BY je.CRRefID),
+    b2f AS (SELECT DISTINCT m.EntryId, m.MovDate, f.PurchaseDocId AS FattId, fa.Accrual
+            FROM m2b m JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID=m.BollaId AND x2.DerivedDocType=27066402
+            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc f ON f.PurchaseDocId=x2.DerivedDocID AND f.DocumentType=9830401
+            JOIN fattacc fa ON fa.FattId=f.PurchaseDocId
+            WHERE ABS(DATEDIFF(day, m.MovDate, fa.Accrual)) <= 365),
+    fr AS (SELECT EntryId, FattId, Accrual, ROW_NUMBER() OVER (PARTITION BY EntryId ORDER BY Accrual) rn FROM b2f)
+    INSERT INTO kodice.carico_fattura (Anno, MovEntryId, MovDate, ValPuro, FattId, FattAccrual)
+    SELECT @Anno, c.EntryId, c.MovDate, c.val, fr.FattId, fr.Accrual
+    FROM carico c LEFT JOIN fr ON fr.EntryId=c.EntryId AND fr.rn=1
+    OPTION (MAXDOP 1);
+END
+GO
