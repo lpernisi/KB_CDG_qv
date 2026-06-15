@@ -794,7 +794,7 @@ def api_riconciliazione_cogs():
         {"n": 6, "k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
         {"n": 7, "k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
         {"n": 8, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
-        {"n": 9, "k": "ricnf", "label": "− Competenza acquisti: merce entrata a magazzino nel periodo ma fattura registrata FUORI periodo (sfasamento ricevimento↔registrazione, al netto del reciproco)", "val": r(-(acq - gl_acq)), "drill": True},
+        {"n": 9, "k": "ricnf", "label": "− Competenza acquisti (nostro carico merce − acquisti registrati in contabilità) — DA APPROFONDIRE: scomposizione timing/merce lato acquisti", "val": r(-(acq - gl_acq)), "drill": True},
         {"n": 10, "k": "rim_iniz", "label": "+ Differenza valutazione rimanenze INIZIALI (contabili − nostre)", "val": r(rin_b - rin_n), "drill": False},
         {"n": 11, "k": "rim_fin", "label": "+ Differenza valutazione rimanenze FINALI (nostre − contabili)", "val": r(rfin_n - rfin_b), "drill": False},
         {"n": 12, "k": "bilancio", "label": "= Consumo materie a CONTABILITÀ — Y (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
