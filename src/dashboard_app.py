@@ -776,7 +776,7 @@ def api_riconciliazione_cogs():
         {"n": 6, "k": "resi", "label": "− Resi da clienti (rientro merce)", "val": r(-resi), "drill": True},
         {"n": 6, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
         {"n": 7, "k": "consfis", "label": "= Consumo materie (flusso fisico magazzino)", "val": r(consumo_fisico), "tot": True},
-        {"n": 7, "k": "ricnf", "label": "− Maggior carico vs fatture acquisto (ricevuto-non-fatturato)", "val": r(-(acq - gl_acq)), "drill": True},
+        {"n": 8, "k": "ricnf", "label": "− Differenza carico merce nostro vs acquisti contabili (GL) — DA SCOMPORRE (ricevuto-non-fatturato + valutazione)", "val": r(-(acq - gl_acq)), "drill": True},
         {"n": 8, "k": "apert", "label": "+ Allineamento valorizzazione apertura (drift report Mago)", "val": r((rin_b - rin_n) + (rfin_n - rfin_b)), "drill": True},
         {"n": 9, "k": "bilancio", "label": "= Consumo materie a BILANCIO (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
     ]
@@ -914,12 +914,24 @@ def api_riconciliazione_drill():
             GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma), resi_tot))
     if k == "ricnf":
-        return jsonify(righe("""SELECT TOP 300 h.Supplier AS fornitore, h.DocNo AS bolla, h.DocumentDate AS data,
-            ROUND(SUM(d.TaxableAmount),2) AS valore
-            FROM KODICEBAGNO_4.dbo.MA_PurchaseDoc h JOIN KODICEBAGNO_4.dbo.MA_PurchaseDocDetail d ON d.PurchaseDocId=h.PurchaseDocId
-            WHERE h.DocumentType=9830400 AND (h.Invoiced=0 OR h.Invoiced IS NULL) AND LTRIM(RTRIM(d.Item))<>''
+        # Bolle d'acquisto (9830400) realmente NON fatturate: il flag Invoiced e' inaffidabile (mostra come
+        # non-fatturate bolle che lo sono). Il legame vero e' bolla->fattura(9830401) in MA_CrossReferences:
+        # NON fatturata = nessuna fattura derivata. Anti-join set-based (CTE) + MAXDOP 1 (no subquery per riga).
+        return jsonify(righe("""
+            WITH fatturate AS (
+                SELECT DISTINCT x.OriginDocID
+                FROM KODICEBAGNO_4.dbo.MA_CrossReferences x
+                JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc f ON f.PurchaseDocId=x.DerivedDocID AND f.DocumentType=9830401)
+            SELECT TOP 300 h.Supplier AS fornitore, h.DocNo AS bolla, h.DocumentDate AS data,
+                   ROUND(SUM(d.TaxableAmount),2) AS valore
+            FROM KODICEBAGNO_4.dbo.MA_PurchaseDoc h
+            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDocDetail d ON d.PurchaseDocId=h.PurchaseDocId
+            LEFT JOIN fatturate ft ON ft.OriginDocID=h.PurchaseDocId
+            WHERE h.DocumentType=9830400 AND ft.OriginDocID IS NULL AND LTRIM(RTRIM(d.Item))<>''
               AND YEAR(h.DocumentDate)=:a AND MONTH(h.DocumentDate) BETWEEN :d AND :h
-            GROUP BY h.Supplier, h.DocNo, h.DocumentDate ORDER BY SUM(d.TaxableAmount) DESC""", a=anno, d=mda, h=ma))
+            GROUP BY h.Supplier, h.DocNo, h.DocumentDate
+            ORDER BY SUM(d.TaxableAmount) DESC
+            OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma))
     if k == "apert":
         # articoli con maggior scostamento di valore d'apertura nostro vs ultimo costo Mago (proxy del drift)
         return jsonify(righe("""SELECT TOP 300 w.Item, ROUND(w.QtaIniz,0) AS giacenza,
