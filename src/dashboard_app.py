@@ -724,6 +724,61 @@ _ORD_NON_SPEDITI_FROM = """
 """
 
 
+# Legame carico merce -> bolla -> fattura per la "competenza acquisti". Ogni carico di merce (mov. 505 KLACQ-OA)
+# risale alla BOLLA (in CrossReferences la bolla 9830400 e' Origin del movimento) e da li' alla FATTURA (la bolla
+# e' Origin anche della fattura 9830401). Bucket per DATA FATTURA: separa il "ricevuto non fatturato" reale (merce
+# entrata, fattura dopo il periodo o assente: deve essere piccolo) dallo sfasamento di confine (fattura gia'
+# registrata in un periodo precedente). NB: ACQ-VALD (rivalutazione cambio) e' escluso qui e confluisce nel residuo.
+_ACQ_CTE = """
+    WITH carico AS (
+        SELECT h.EntryId, MIN(CAST(h.PostingDate AS date)) MovDate,
+               SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END) val
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+        WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA'
+          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+        GROUP BY h.EntryId),
+    m2b AS (SELECT DISTINCT c.EntryId, c.MovDate, x.OriginDocID AS BollaId
+            FROM carico c JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x ON x.DerivedDocID=c.EntryId
+            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc b ON b.PurchaseDocId=x.OriginDocID AND b.DocumentType=9830400),
+    -- fattura collegata entro +/- 1 anno dal carico (oltre = aggancio spurio del grafo CrossReferences, scartato)
+    b2f AS (SELECT DISTINCT m.EntryId, m.MovDate, CAST(f.DocumentDate AS date) FattDate
+            FROM m2b m JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID=m.BollaId
+            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc f ON f.PurchaseDocId=x2.DerivedDocID AND f.DocumentType=9830401
+            WHERE ABS(DATEDIFF(day, m.MovDate, f.DocumentDate)) <= 365),
+    -- fattura collegata = la PIU' ANTICA entro l'anno (la fattura d'origine della merce, non una coincidenza in-periodo)
+    fr AS (SELECT EntryId, FattDate, ROW_NUMBER() OVER (PARTITION BY EntryId ORDER BY FattDate) rn FROM b2f),
+    cf AS (SELECT c.EntryId, c.val, fr.FattDate FROM carico c LEFT JOIN fr ON fr.EntryId=c.EntryId AND fr.rn=1)
+"""
+
+# Giroconti/scritture sui conti materiale SENZA documento dietro (la fattura giustifica il conto; queste no):
+# registrazioni su 06011000/oneri il cui movimento contabile non si lega ad alcun MA_PurchaseDoc.
+# Solo conti MERCE (Ruolo='ACQUISTO': 06011000/02): qui "nessun MA_PurchaseDoc dietro" = davvero giroconto manuale.
+# Gli oneri (trasporti/dazi) sono spesso registrati con doc NON-acquisto -> li lasciamo a oneri/valutazione residua.
+_GL_NODOC_WHERE = """q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO'
+          AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h AND pd.PurchaseDocId IS NULL"""
+
+
+def _ric_acq(anno, mda, ma):
+    """Scompone la competenza acquisti (nostro carico merce vs acquisti registrati in contabilita') in voci
+    parlanti: ricevuto-non-fatturato (fattura dopo il periodo / assente), fatturato in periodo precedente,
+    giroconti senza documento. Vedi _ACQ_CTE."""
+    fn = lambda v: float(v or 0)
+    ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
+    b = righe(_ACQ_CTE + """
+        SELECT ISNULL(SUM(CASE WHEN cf.FattDate IS NULL THEN cf.val END),0) nofatt,
+               ISNULL(SUM(CASE WHEN cf.FattDate < :ini THEN cf.val END),0) prec,
+               ISNULL(SUM(CASE WHEN cf.FattDate >= :fin1 THEN cf.val END),0) dopo
+        FROM cf OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, ini=ini, fin1=fin1)[0]
+    glnodoc = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
+        FROM kodice.conti_quadratura q
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID
+        WHERE """ + _GL_NODOC_WHERE + " OPTION (MAXDOP 1)", a=anno, d=mda, h=ma)[0]["v"])
+    return {"prec": fn(b["prec"]), "dopo": fn(b["dopo"]), "nofatt": fn(b["nofatt"]), "glnodoc": glnodoc}
+
+
 @app.get("/api/riconciliazione_cogs")
 def api_riconciliazione_cogs():
     """Prospetto di riconciliazione: dal costo del venduto CDG (abbinato al fatturato) al CONSUMO materie
@@ -764,6 +819,17 @@ def api_riconciliazione_cogs():
           WHERE b.FiscalYear=:a AND (b.BalanceType=3145728 OR (b.BalanceType=3145730 AND b.BalanceMonth BETWEEN 1 AND :h))) fin
     """, a=anno, h=ma)[0]
     rin_b = fn(rb["ini"]); rfin_b = fn(rb["fin"])
+    # Scomposizione della "competenza acquisti" (gl_acq − acq) in voci parlanti (vedi _ric_acq):
+    acq_oneri = fn(righe("SELECT SUM(ValAcqOneri) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h", a=anno, d=mda, h=ma)[0]["v"])
+    gl_oneri = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
+        FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+        WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO'
+          AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
+    ab = _ric_acq(anno, mda, ma)
+    ricnf_tot = gl_acq - acq                                   # totale competenza acquisti = −(acq − gl_acq)
+    oneri_contrib = gl_oneri - acq_oneri                       # oneri: registrati in GL − nostro carico
+    # residuo di VALUTAZIONE (carico vs fattura merce sui documenti del periodo, incl. cambio): bilancia per costruzione
+    acq_val_resid = ricnf_tot - (-ab["prec"] - ab["dopo"] - ab["nofatt"] + ab["glnodoc"] + oneri_contrib)
     consumo_fisico = rin_n + acq - rfin_n
     consumo_bil = gl_acq + rin_b - rfin_b
     # Scomposizione dello sfasamento spedizione/fattura dal LINK materializzato (kodice.vendite_link):
@@ -794,10 +860,15 @@ def api_riconciliazione_cogs():
         {"n": 6, "k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
         {"n": 7, "k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
         {"n": 8, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
-        {"n": 9, "k": "ricnf", "label": "− Competenza acquisti (nostro carico merce − acquisti registrati in contabilità) — DA APPROFONDIRE: scomposizione timing/merce lato acquisti", "val": r(-(acq - gl_acq)), "drill": True},
-        {"n": 10, "k": "rim_iniz", "label": "+ Differenza valutazione rimanenze INIZIALI (contabili − nostre)", "val": r(rin_b - rin_n), "drill": False},
-        {"n": 11, "k": "rim_fin", "label": "+ Differenza valutazione rimanenze FINALI (nostre − contabili)", "val": r(rfin_n - rfin_b), "drill": False},
-        {"n": 12, "k": "bilancio", "label": "= Consumo materie a CONTABILITÀ — Y (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
+        {"n": 9, "k": "ricnf_prec", "label": "− Fatturato in periodo precedente (fattura già registrata prima, merce ricevuta nel periodo)", "val": r(-ab["prec"]), "drill": True},
+        {"n": 10, "k": "ricnf_dopo", "label": "− Ricevuto non fatturato: merce a magazzino, fattura emessa DOPO il periodo", "val": r(-ab["dopo"]), "drill": True},
+        {"n": 11, "k": "ricnf_nofatt", "label": "− Ricevuto non fatturato: merce a magazzino, nessuna fattura collegata", "val": r(-ab["nofatt"]), "drill": True},
+        {"n": 12, "k": "glnodoc", "label": "± Registrazioni a conto materiale SENZA documento (giroconti contabili: es. \"merci in transito\")", "val": r(ab["glnodoc"]), "drill": True},
+        {"n": 13, "k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (registrati in contabilità − nostro carico: dazi, trasporti import)", "val": r(oneri_contrib), "drill": True},
+        {"n": 14, "k": "ricnf_val", "label": "± Differenza di valutazione carico vs fattura merce (documenti del periodo, incl. cambio)", "val": r(acq_val_resid), "drill": False},
+        {"n": 15, "k": "rim_iniz", "label": "+ Differenza valutazione rimanenze INIZIALI (contabili − nostre)", "val": r(rin_b - rin_n), "drill": False},
+        {"n": 16, "k": "rim_fin", "label": "+ Differenza valutazione rimanenze FINALI (nostre − contabili)", "val": r(rfin_n - rfin_b), "drill": False},
+        {"n": 17, "k": "bilancio", "label": "= Consumo materie a CONTABILITÀ — Y (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
     ]
     ord_ns = righe("SELECT COUNT(*) n " + _ORD_NON_SPEDITI_FROM, fine=_fine_periodo(anno, ma))[0]["n"]
     return jsonify({"anno": anno, "mese_da": mda, "mese_a": ma, "righe": righe_out,
@@ -932,21 +1003,51 @@ def api_riconciliazione_drill():
               AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
             GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma), resi_tot))
-    if k == "ricnf":
-        # SPIEGAZIONE (somma alla riga): il nostro carico di merce RICEVUTA a magazzino supera gli acquisti
-        # REGISTRATI in contabilita' (GL) = merce ricevuta il cui acquisto non e' ancora a libro (timing). Split puro/oneri.
+    if k in ("ricnf_prec", "ricnf_dopo", "ricnf_nofatt"):
+        # Carico merce per FORNITORE, bucketizzato per data fattura (risalita bolla->fattura, vedi _ACQ_CTE).
+        # prec=fattura registrata prima del periodo; dopo=fattura dopo il periodo; nofatt=nessuna fattura collegata.
+        ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
+        cond = {"ricnf_prec": "cf.FattDate < :ini",
+                "ricnf_dopo": "cf.FattDate >= :fin1",
+                "ricnf_nofatt": "cf.FattDate IS NULL"}[k]
+        rows = righe(_ACQ_CTE + """
+            SELECT TOP 300 ISNULL(cs.CompanyName, h.CustSupp) AS fornitore,
+                   CONVERT(varchar(10), CAST(MIN(h.PostingDate) AS date), 103) AS carico,
+                   MAX(CONVERT(varchar(10), cf.FattDate, 103)) AS fattura,
+                   ROUND(-SUM(cf.val), 2) AS valore
+            FROM cf
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=cf.EntryId
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=h.CustSupp
+            WHERE """ + cond + """
+            GROUP BY ISNULL(cs.CompanyName, h.CustSupp)
+            ORDER BY ABS(SUM(cf.val)) DESC OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, ini=ini, fin1=fin1)
+        ab = _ric_acq(anno, mda, ma)
+        tot = {"ricnf_prec": -ab["prec"], "ricnf_dopo": -ab["dopo"], "ricnf_nofatt": -ab["nofatt"]}[k]
+        return jsonify(_con_resto(rows, tot))
+    if k == "glnodoc":
+        # Le RIGHE DI REGISTRAZIONE sui conti materiale che NON hanno un documento (fattura) dietro: giroconti
+        # manuali (es. "merci in transito"). DARE positivo / AVERE negativo: sommano al netto della riga.
+        rows = righe("""SELECT CONVERT(varchar(10), CAST(g.PostingDate AS date),103) AS data,
+                NULLIF(je.DocNo,'') AS documento, g.AccRsn AS causale, q.Account AS conto,
+                CAST(g.Notes AS nvarchar(200)) AS note,
+                ROUND(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END,2) AS valore
+            FROM kodice.conti_quadratura q
+            JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+            JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID
+            WHERE """ + _GL_NODOC_WHERE + """
+            ORDER BY ABS(g.Amount) DESC OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma)
+        return jsonify(_con_resto(rows, _ric_acq(anno, mda, ma)["glnodoc"]))
+    if k == "ricnf_oneri":
         gg = lambda s: fn(righe(s, a=anno, d=mda, h=ma)[0]["v"])
-        puro = gg("SELECT SUM(ValAcqPuro) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h")
         oneri = gg("SELECT SUM(ValAcqOneri) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h")
-        glsql = """SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
+        glo = gg("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
             FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
-            WHERE q.Componente='MATERIALE' AND q.Ruolo=:ruolo AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h"""
-        glp = fn(righe(glsql, a=anno, d=mda, h=ma, ruolo='ACQUISTO')[0]["v"])
-        glo = fn(righe(glsql, a=anno, d=mda, h=ma, ruolo='ONERE_ACQUISTO')[0]["v"])
+            WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO' AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h""")
         ev = lambda x: ("%.0f" % x).replace(",", ".")
         return jsonify([
-            {"voce": "Merce pura ricevuta a magazzino (carico " + ev(puro) + " €) − acquisti merce registrati in contabilità (GL " + ev(glp) + " €)", "valore": round(-(puro - glp), 2)},
-            {"voce": "Oneri accessori (dazi, trasporti import): nostri " + ev(oneri) + " € − registrati in GL " + ev(glo) + " €", "valore": round(-(oneri - glo), 2)},
+            {"voce": "Oneri accessori registrati in contabilità (dazi/trasporti import, conti 06013/14/15): " + ev(glo) + " €", "valore": round(glo, 2)},
+            {"voce": "Oneri accessori capitalizzati nel nostro carico a magazzino: " + ev(oneri) + " €", "valore": round(-oneri, 2)},
         ])
     if k == "apert":
         # articoli con maggior scostamento di valore d'apertura nostro vs ultimo costo Mago (proxy del drift)
