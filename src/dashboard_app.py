@@ -1109,16 +1109,28 @@ def api_riconciliazione_drill():
             ORDER BY ABS(g.Amount) DESC OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma)
         return jsonify(_con_resto(rows, _ric_acq(anno, mda, ma)["glnodoc"]))
     if k == "ricnf_oneri":
-        gg = lambda s: fn(righe(s, a=anno, d=mda, h=ma)[0]["v"])
-        oneri = gg("SELECT SUM(ValAcqOneri) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h")
-        glo = gg("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
-            FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
-            WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h""")
-        ev = lambda x: ("%.0f" % x).replace(",", ".")
-        return jsonify([
-            {"voce": "Oneri accessori registrati in contabilità (dazi/trasporti import, conti 06013/14/15): " + ev(glo) + " €", "valore": round(glo, 2)},
-            {"voce": "Oneri accessori capitalizzati nel nostro carico a magazzino: " + ev(oneri) + " €", "valore": round(-oneri, 2)},
-        ])
+        # MESE PER MESE: oneri in CONTABILITA' (competenza AccrualDate) vs spalmati a MAGAZZINO (movimenti
+        # IMPORT/AGGDAZI, Qty=0). Dove la differenza non e' 0, magazzino e contabilita' NON si muovono nello
+        # stesso mese: INDICAZIONE PER MAGO = spalmare l'onere nel mese di competenza. La somma = riga (16,4k).
+        gl = {r["m"]: fn(r["v"]) for r in righe("""SELECT MONTH(g.AccrualDate) m,
+                SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) v
+                FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+                WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+                GROUP BY MONTH(g.AccrualDate)""", a=anno, d=mda, h=ma)}
+        sp = {r["m"]: fn(r["v"]) for r in righe("""SELECT MONTH(h.PostingDate) m,
+                SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END) v
+                FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+                LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+                WHERE h.WAPMovementType=2032533505 AND d.Qty=0 AND h.InvRsn<>'ACQ-VALD' AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+                  AND h.CancelPhase1='0' AND h.CancelPhase2='0' AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+                GROUP BY MONTH(h.PostingDate)""", a=anno, d=mda, h=ma)}
+        mesi = {1:"Gennaio",2:"Febbraio",3:"Marzo",4:"Aprile",5:"Maggio",6:"Giugno",7:"Luglio",8:"Agosto",9:"Settembre",10:"Ottobre",11:"Novembre",12:"Dicembre"}
+        out = []
+        for m in range(mda, ma + 1):
+            g = gl.get(m, 0.0); s = sp.get(m, 0.0)
+            out.append({"mese": mesi[m], "importo_contabilita": round(g, 2), "spalmato_magazzino": round(s, 2),
+                        "differenza_da_allineare": round(g - s, 2)})
+        return jsonify(out)
     if k == "apert":
         # articoli con maggior scostamento di valore d'apertura nostro vs ultimo costo Mago (proxy del drift)
         return jsonify(righe("""SELECT TOP 300 w.Item, ROUND(w.QtaIniz,0) AS giacenza,
