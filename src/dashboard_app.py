@@ -794,7 +794,7 @@ def api_riconciliazione_cogs():
         {"n": 6, "k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
         {"n": 7, "k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
         {"n": 8, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
-        {"n": 9, "k": "ricnf", "label": "− Competenza ACQUISTI (carico merce nostro − acquisti contabili GL): ricevuto-non-fatturato ~15,6k + oneri/valutazione (residuo)", "val": r(-(acq - gl_acq)), "drill": False},
+        {"n": 9, "k": "ricnf", "label": "− Competenza acquisti: merce entrata a magazzino nel periodo ma fattura registrata FUORI periodo (sfasamento ricevimento↔registrazione, al netto del reciproco)", "val": r(-(acq - gl_acq)), "drill": True},
         {"n": 10, "k": "rim_iniz", "label": "+ Differenza valutazione rimanenze INIZIALI (contabili − nostre)", "val": r(rin_b - rin_n), "drill": False},
         {"n": 11, "k": "rim_fin", "label": "+ Differenza valutazione rimanenze FINALI (nostre − contabili)", "val": r(rfin_n - rfin_b), "drill": False},
         {"n": 12, "k": "bilancio", "label": "= Consumo materie a CONTABILITÀ — Y (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
@@ -933,24 +933,21 @@ def api_riconciliazione_drill():
             GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma), resi_tot))
     if k == "ricnf":
-        # Bolle d'acquisto (9830400) realmente NON fatturate: il flag Invoiced e' inaffidabile (mostra come
-        # non-fatturate bolle che lo sono). Il legame vero e' bolla->fattura(9830401) in MA_CrossReferences:
-        # NON fatturata = nessuna fattura derivata. Anti-join set-based (CTE) + MAXDOP 1 (no subquery per riga).
-        return jsonify(righe("""
-            WITH fatturate AS (
-                SELECT DISTINCT x.OriginDocID
-                FROM KODICEBAGNO_4.dbo.MA_CrossReferences x
-                JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc f ON f.PurchaseDocId=x.DerivedDocID AND f.DocumentType=9830401)
-            SELECT TOP 300 h.Supplier AS fornitore, h.DocNo AS bolla, h.DocumentDate AS data,
-                   ROUND(SUM(d.TaxableAmount),2) AS valore
-            FROM KODICEBAGNO_4.dbo.MA_PurchaseDoc h
-            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDocDetail d ON d.PurchaseDocId=h.PurchaseDocId
-            LEFT JOIN fatturate ft ON ft.OriginDocID=h.PurchaseDocId
-            WHERE h.DocumentType=9830400 AND ft.OriginDocID IS NULL AND LTRIM(RTRIM(d.Item))<>''
-              AND YEAR(h.DocumentDate)=:a AND MONTH(h.DocumentDate) BETWEEN :d AND :h
-            GROUP BY h.Supplier, h.DocNo, h.DocumentDate
-            ORDER BY SUM(d.TaxableAmount) DESC
-            OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma))
+        # SPIEGAZIONE (somma alla riga): il nostro carico di merce RICEVUTA a magazzino supera gli acquisti
+        # REGISTRATI in contabilita' (GL) = merce ricevuta il cui acquisto non e' ancora a libro (timing). Split puro/oneri.
+        gg = lambda s: fn(righe(s, a=anno, d=mda, h=ma)[0]["v"])
+        puro = gg("SELECT SUM(ValAcqPuro) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h")
+        oneri = gg("SELECT SUM(ValAcqOneri) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h")
+        glsql = """SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
+            FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+            WHERE q.Componente='MATERIALE' AND q.Ruolo=:ruolo AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h"""
+        glp = fn(righe(glsql, a=anno, d=mda, h=ma, ruolo='ACQUISTO')[0]["v"])
+        glo = fn(righe(glsql, a=anno, d=mda, h=ma, ruolo='ONERE_ACQUISTO')[0]["v"])
+        ev = lambda x: ("%.0f" % x).replace(",", ".")
+        return jsonify([
+            {"voce": "Merce pura ricevuta a magazzino (carico " + ev(puro) + " €) − acquisti merce registrati in contabilità (GL " + ev(glp) + " €)", "valore": round(-(puro - glp), 2)},
+            {"voce": "Oneri accessori (dazi, trasporti import): nostri " + ev(oneri) + " € − registrati in GL " + ev(glo) + " €", "valore": round(-(oneri - glo), 2)},
+        ])
     if k == "apert":
         # articoli con maggior scostamento di valore d'apertura nostro vs ultimo costo Mago (proxy del drift)
         return jsonify(righe("""SELECT TOP 300 w.Item, ROUND(w.QtaIniz,0) AS giacenza,
@@ -968,24 +965,41 @@ def api_riconciliazione_drill():
                    v.NrRighe AS righe, v.QtaOrdinata AS qta_ordinata,
                    CASE WHEN v.CompletamenteConsegnato = 'No' THEN 'backlog' ELSE 'spedito dopo chiusura' END AS stato
             """ + _ORD_NON_SPEDITI_FROM + " ORDER BY v.DataOrdine DESC", fine=_fine_periodo(anno, ma)))
-    if k in ("uscita_ddt", "sost"):
-        # Drill dal link materializzato: ogni movimento spedito con la sua fattura (o assenza), valore a WAPCost_ricalc.
-        # uscita_ddt = spedito-fatturato-prima + spedito-senza-fattura (DDT/differita); sost = sostituzioni gratuite.
+    if k == "uscita_ddt":
+        # SINTESI per categoria (poche righe leggibili che sommano al totale), non un elenco di 400 movimenti.
         ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
-        cond = ("vl.Modo='SOSTITUZIONE'" if k == "sost" else
-                "((vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini) "
-                "OR vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE'))")
-        base = """ FROM kodice.vendite_link vl
-            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=vl.MovEntryId
-            LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(vl.MovDate)
-            WHERE vl.MovDate>=:ini AND vl.MovDate<:fin1 AND """ + cond
-        tot = fn(righe("SELECT ISNULL(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),0) v" + base, a=anno, ini=ini, fin1=fin1)[0]["v"])
-        rows = righe("""SELECT TOP 400 vl.InternalOrdNo AS ordine, CONVERT(varchar(10), vl.MovDate, 103) AS data,
-                   vl.Modo, CONVERT(varchar(10), vl.FatturaDate, 103) AS data_fattura,
-                   ROUND(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore""" + base + """
-            GROUP BY vl.InternalOrdNo, vl.MovDate, vl.Modo, vl.FatturaDate
-            ORDER BY SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)) DESC""", a=anno, ini=ini, fin1=fin1)
-        return jsonify(_con_resto(rows, tot))
+        return jsonify(righe("""
+            SELECT spiegazione, COUNT(DISTINCT EntryId) AS movimenti, ROUND(SUM(val),2) AS valore FROM (
+                SELECT vl.MovEntryId AS EntryId,
+                    CASE WHEN vl.Modo = 'NESSUN_ORDINE'
+                              THEN 'Spedizione senza ordine collegato (da indagare)'
+                         WHEN vl.Modo = 'SOLO_ORDINE'
+                              THEN 'Ordine/DDT B2B: fattura differita non ancora emessa (verra'' fatturata dopo)'
+                         ELSE 'Spedito nel periodo ma fatturato in un periodo precedente (arretrato d''apertura lavorato)'
+                    END AS spiegazione,
+                    d.Qty * ISNULL(wr.WAPCost_ricalc, 0) AS val
+                FROM kodice.vendite_link vl
+                JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId = vl.MovEntryId
+                LEFT JOIN kodice.wap_ricalc wr ON wr.Item = LTRIM(RTRIM(d.Item)) AND wr.Anno = :a AND wr.Mese = MONTH(vl.MovDate)
+                WHERE vl.MovDate >= :ini AND vl.MovDate < :fin1
+                  AND ((vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini)
+                       OR vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE'))
+            ) z GROUP BY spiegazione ORDER BY SUM(val) DESC""", a=anno, ini=ini, fin1=fin1))
+    if k == "sost":
+        # SINTESI sostituzioni gratuite per cliente/canale (chi ha ricevuto merce gratis).
+        ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
+        return jsonify(righe("""
+            SELECT ISNULL(cs.CompanyName, h.CustSupp) AS cliente, COUNT(DISTINCT vl.MovEntryId) AS movimenti,
+                   ROUND(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
+            FROM kodice.vendite_link vl
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = vl.MovEntryId
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId = vl.MovEntryId
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = h.CustSupp
+            LEFT JOIN kodice.wap_ricalc wr ON wr.Item = LTRIM(RTRIM(d.Item)) AND wr.Anno = :a AND wr.Mese = MONTH(vl.MovDate)
+            WHERE vl.Modo = 'SOSTITUZIONE' AND vl.MovDate >= :ini AND vl.MovDate < :fin1
+            GROUP BY ISNULL(cs.CompanyName, h.CustSupp)
+            HAVING ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) > 0.005
+            ORDER BY SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)) DESC""", a=anno, ini=ini, fin1=fin1))
     return jsonify([])
 
 
