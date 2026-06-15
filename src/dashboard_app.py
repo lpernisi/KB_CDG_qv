@@ -766,19 +766,38 @@ def api_riconciliazione_cogs():
     rin_b = fn(rb["ini"]); rfin_b = fn(rb["fin"])
     consumo_fisico = rin_n + acq - rfin_n
     consumo_bil = gl_acq + rin_b - rfin_b
+    # Scomposizione dello sfasamento spedizione/fattura dal LINK materializzato (kodice.vendite_link):
+    #  - apertura: spedito nel periodo ma fatturato PRIMA (arretrato d'inizio anno lavorato)
+    #  - residuo : spedito su DDT/ordine ma fattura non (ancora) emessa nel periodo (differita B2B in attesa)
+    #  - sost    : sostituzioni gratuite (DDT senza fattura): COSTO del venduto a ricavo 0 = perdita
+    _ini = datetime.date(anno, mda, 1)
+    _fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
+    vlb = righe("""SELECT
+        ISNULL(SUM(CASE WHEN vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini
+                        THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) apertura,
+        ISNULL(SUM(CASE WHEN vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE') THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) residuo,
+        ISNULL(SUM(CASE WHEN vl.Modo='SOSTITUZIONE' THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) sost
+        FROM kodice.vendite_link vl
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=vl.MovEntryId
+        LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(vl.MovDate)
+        WHERE vl.MovDate>=:ini AND vl.MovDate<:fin1""", a=anno, ini=_ini, fin1=_fin1)[0]
+    sped_ap = fn(vlb["apertura"]); sped_res = fn(vlb["residuo"]); sped_sost = fn(vlb["sost"])
+    sped_val = (vend - cogs) - (sped_ap + sped_res + sped_sost)   # residuo: valutazione (WAP vs certif.) + chiusura
     r = lambda x: round(x, 2)
+    # Ponte nella struttura richiesta: da COGS (X) a Consumo materie contabile (Y), per categorie. Somma = Y (identita').
     righe_out = [
-        {"n": 1, "k": "cogs", "label": "Costo del venduto CDG (abbinato al fatturato)", "val": r(cogs), "tot": True, "drill": True},
-        {"n": 2, "k": "sped", "label": "+ Merce spedita non ancora fatturata (sfasamento vendite)", "val": r(vend - cogs), "drill": True},
-        {"n": 3, "k": "fisico", "label": "= Costo del venduto FISICO (scarico magazzino vendite)", "val": r(vend), "tot": True, "drill": True},
-        {"n": 4, "k": "rettneg", "label": "+ Rettifiche negative — consumi non-vendita (imballaggi, perdite, inventari)", "val": r(rett_n), "drill": True},
-        {"n": 5, "k": "rettpos", "label": "− Rettifiche positive — rientri / aumenti d'inventario", "val": r(-rett_p), "drill": True},
-        {"n": 6, "k": "resi", "label": "− Resi da clienti (rientro merce)", "val": r(-resi), "drill": True},
-        {"n": 6, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
-        {"n": 7, "k": "consfis", "label": "= Consumo materie (flusso fisico magazzino)", "val": r(consumo_fisico), "tot": True},
-        {"n": 8, "k": "ricnf", "label": "− Differenza carico merce nostro vs acquisti contabili (GL) — DA SCOMPORRE (ricevuto-non-fatturato + valutazione)", "val": r(-(acq - gl_acq)), "drill": True},
-        {"n": 8, "k": "apert", "label": "+ Allineamento valorizzazione apertura (drift report Mago)", "val": r((rin_b - rin_n) + (rfin_n - rfin_b)), "drill": True},
-        {"n": 9, "k": "bilancio", "label": "= Consumo materie a BILANCIO (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
+        {"n": 1, "k": "cogs", "label": "Costo del venduto CDG — X (abbinato al fatturato)", "val": r(cogs), "tot": True, "drill": True},
+        {"n": 2, "k": "uscita_ddt", "label": "+ Merce USCITA nel periodo ma NON in COGS (spedito su DDT/ordine, fattura prima o differita non ancora emessa)", "val": r(sped_ap + sped_res), "drill": True},
+        {"n": 3, "k": "sost", "label": "+ Sostituzioni gratuite (DDT senza fattura: 0 ricavo, costo valorizzato = perdita → in COGS)", "val": r(sped_sost), "drill": True},
+        {"n": 4, "k": "valsped", "label": "± Differenza di valutazione scarico (WAP-ricalc vs costo certificato) e residuo chiusura", "val": r(sped_val), "drill": False},
+        {"n": 5, "k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (imballaggi, inventari di fine mese)", "val": r(rett_n), "drill": True},
+        {"n": 6, "k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
+        {"n": 7, "k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
+        {"n": 8, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
+        {"n": 9, "k": "ricnf", "label": "− Competenza ACQUISTI (carico merce nostro − acquisti contabili GL): ricevuto-non-fatturato ~15,6k + oneri/valutazione (residuo)", "val": r(-(acq - gl_acq)), "drill": False},
+        {"n": 10, "k": "rim_iniz", "label": "+ Differenza valutazione rimanenze INIZIALI (contabili − nostre)", "val": r(rin_b - rin_n), "drill": False},
+        {"n": 11, "k": "rim_fin", "label": "+ Differenza valutazione rimanenze FINALI (nostre − contabili)", "val": r(rfin_n - rfin_b), "drill": False},
+        {"n": 12, "k": "bilancio", "label": "= Consumo materie a CONTABILITÀ — Y (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
     ]
     ord_ns = righe("SELECT COUNT(*) n " + _ORD_NON_SPEDITI_FROM, fine=_fine_periodo(anno, ma))[0]["n"]
     return jsonify({"anno": anno, "mese_da": mda, "mese_a": ma, "righe": righe_out,
@@ -949,6 +968,24 @@ def api_riconciliazione_drill():
                    v.NrRighe AS righe, v.QtaOrdinata AS qta_ordinata,
                    CASE WHEN v.CompletamenteConsegnato = 'No' THEN 'backlog' ELSE 'spedito dopo chiusura' END AS stato
             """ + _ORD_NON_SPEDITI_FROM + " ORDER BY v.DataOrdine DESC", fine=_fine_periodo(anno, ma)))
+    if k in ("uscita_ddt", "sost"):
+        # Drill dal link materializzato: ogni movimento spedito con la sua fattura (o assenza), valore a WAPCost_ricalc.
+        # uscita_ddt = spedito-fatturato-prima + spedito-senza-fattura (DDT/differita); sost = sostituzioni gratuite.
+        ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
+        cond = ("vl.Modo='SOSTITUZIONE'" if k == "sost" else
+                "((vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini) "
+                "OR vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE'))")
+        base = """ FROM kodice.vendite_link vl
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=vl.MovEntryId
+            LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(vl.MovDate)
+            WHERE vl.MovDate>=:ini AND vl.MovDate<:fin1 AND """ + cond
+        tot = fn(righe("SELECT ISNULL(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),0) v" + base, a=anno, ini=ini, fin1=fin1)[0]["v"])
+        rows = righe("""SELECT TOP 400 vl.InternalOrdNo AS ordine, CONVERT(varchar(10), vl.MovDate, 103) AS data,
+                   vl.Modo, CONVERT(varchar(10), vl.FatturaDate, 103) AS data_fattura,
+                   ROUND(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore""" + base + """
+            GROUP BY vl.InternalOrdNo, vl.MovDate, vl.Modo, vl.FatturaDate
+            ORDER BY SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)) DESC""", a=anno, ini=ini, fin1=fin1)
+        return jsonify(_con_resto(rows, tot))
     return jsonify([])
 
 
@@ -1484,9 +1521,12 @@ async function caricaRiconc(){
   const d=await j(`/api/riconciliazione_cogs?anno=${a}&mese_da=1&mese_a=${m}`);
   window._ricP={a,m};
   const co=d.contabile||{}, no=d.nostro||{};
-  let h=`<p class="muted">Periodo <strong>${a}</strong> (mesi 1–${m}, progressivo). Ponte dal <strong>costo del venduto CdG</strong> (abbinato al fatturato, per la marginalità) al <strong>consumo materie a bilancio</strong>. Clicca una riga ▸ per il dettaglio dei documenti/articoli.</p>`;
+  const gv=k=>((d.righe||[]).find(x=>x.k===k)||{}).val||0;
+  const _X=gv('cogs'), _Y=gv('bilancio');
+  let h=`<p class="muted">Periodo <strong>${a}</strong> (mesi 1–${m}, progressivo). Riconciliazione tra <strong>COGS calcolato (X)</strong> e <strong>consumo materie a contabilità (Y)</strong>: ogni scarto è una riga spiegata, i drill ▸ sommano al centesimo.</p>`;
+  h+=`<div class="banner ok" style="font-size:13.5px;margin-bottom:10px">COGS calcolato <strong>X = ${eur(_X)}</strong> &nbsp;·&nbsp; Consumo contabile <strong>Y = ${eur(_Y)}</strong> &nbsp;·&nbsp; <strong>X − Y = ${eur(_X-_Y)}</strong> &nbsp;→&nbsp; spiegato dalle componenti qui sotto.</div>`;
   h+=`<div class="row" style="grid-template-columns:1fr 330px">`;
-  h+=`<div class="panel"><h2>Ponte CdG → Contabilità</h2><table><tbody>`;
+  h+=`<div class="panel"><h2>Da COGS (X) a Consumo contabile (Y)</h2><table><tbody>`;
   (d.righe||[]).forEach(x=>{
     const tot=x.tot?'font-weight:700;border-top:2px solid var(--line);background:#faf8f2':'';
     h+=`<tr class="${x.drill?'drill':''}" style="${tot}" ${x.drill?`onclick="ricDrill('${x.k}')"`:''}>
