@@ -744,8 +744,10 @@ _ACQ_CTE = """
             FROM carico c JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x ON x.DerivedDocID=c.EntryId
             JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc b ON b.PurchaseDocId=x.OriginDocID AND b.DocumentType=9830400),
     -- fattura collegata entro +/- 1 anno dal carico (oltre = aggancio spurio del grafo CrossReferences, scartato)
+    -- SOLO la derivazione vera bolla->fattura d'acquisto (CrossRef DerivedDocType 27066402): la bolla puo'
+    -- avere anche link SPURI ad altre fatture (tipo 27066389, anche di anni fa) che falsavano l'aggancio.
     b2f AS (SELECT DISTINCT m.EntryId, m.MovDate, CAST(f.DocumentDate AS date) FattDate
-            FROM m2b m JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID=m.BollaId
+            FROM m2b m JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID=m.BollaId AND x2.DerivedDocType=27066402
             JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc f ON f.PurchaseDocId=x2.DerivedDocID AND f.DocumentType=9830401
             WHERE ABS(DATEDIFF(day, m.MovDate, f.DocumentDate)) <= 365),
     -- fattura collegata = la PIU' ANTICA entro l'anno (la fattura d'origine della merce, non una coincidenza in-periodo)
