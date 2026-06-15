@@ -15,14 +15,15 @@
 --   i movimenti in valuta estera (Fixing = cambio del movimento; EUR -> Fixing 0, nessuna conversione):
 --     ACQUISTI (2032533505): +Qty; valore spaccato per QUANTITA' (come MA_ItemsWAP): movimento CON qty = acquisto
 --                            (puro); SENZA qty = oneri/cambi spalmati (dazi/import + differenze cambio ACQ-VALD).
---     VENDITE  (2032533506): -Qty
+--     VENDITE  (2032533506): -Qty  (ESCLUSO il cliente 70209 AMAZON LOGISTICA = trasferimento FBA, vedi sotto)
 --     RESI     (2032533509): +Qty (rientro al WAPCost di periodo)
---     TRASFERIMENTI (507) / IGNORA (508) / NULL: esclusi
+--     RETTIFICHE (507 KLRI/RI/KLR-FORA): ±Qty costo-neutro ; TRASFERIMENTO FBA (CAR-AMA + scarico 70209): netto in QtaTrasfFBA
+--     IGNORA (508) / KL-TRASF / MOV-DEP / NULL: esclusi
 --   Media ponderata di periodo:
 --     puro_unit  = (ValPuroIniz  + ValAcqPuro)  / (QtaIniz + QtaAcq)
 --     oneri_unit = (ValOneriIniz + ValAcqOneri) / (QtaIniz + QtaAcq)
 --     WAPCost_ricalc = puro_unit + oneri_unit          (somma SEMPRE = costo; split garantito)
---     QtaFin = QtaIniz + QtaAcq - QtaVend + QtaResi
+--     QtaFin = QtaIniz + QtaAcq - QtaVend + QtaResi + QtaRettTrasf + QtaTrasfFBA
 --     ValPuroFin = puro_unit*QtaFin ; ValOneriFin = oneri_unit*QtaFin
 --   Il mese successivo parte da *Fin. Colonna di CONTROLLO: WAPCost_Mago (stesso mese) e Delta.
 -- =============================================================================
@@ -43,7 +44,8 @@ CREATE TABLE kodice.wap_ricalc (
     ValAcqOneri   float        NULL,
     QtaVend       float        NULL,
     QtaResi       float        NULL,
-    QtaRettTrasf  float        NULL,   -- rettifiche/trasferimenti con segno (CAR-AMA +, KLRI/RI ±, KLR-FORA −), costo-neutro
+    QtaRettTrasf  float        NULL,   -- rettifiche con segno (KLRI/RI ±, KLR-FORA −), costo-neutro
+    QtaTrasfFBA   float        NULL,   -- trasferimento FBA Amazon, netto: +CAR-AMA(carico) −scarico506 al cliente 70209, costo-neutro
     QtaFin        float        NULL,
     ValPuroFin    float        NULL,
     ValOneriFin   float        NULL,
@@ -56,9 +58,12 @@ CREATE TABLE kodice.wap_ricalc (
 );
 GO
 
--- aggiunta colonna se la tabella esisteva gia' (idempotente)
+-- aggiunta colonne se la tabella esisteva gia' (idempotente)
 IF COL_LENGTH('kodice.wap_ricalc', 'QtaRettTrasf') IS NULL
     ALTER TABLE kodice.wap_ricalc ADD QtaRettTrasf float NULL;
+GO
+IF COL_LENGTH('kodice.wap_ricalc', 'QtaTrasfFBA') IS NULL
+    ALTER TABLE kodice.wap_ricalc ADD QtaTrasfFBA float NULL;
 GO
 
 -- =============================================================================
@@ -215,16 +220,24 @@ BEGIN
                    SUM(CASE WHEN h.WAPMovementType = 2032533505 AND (d.Qty <> 0 OR h.InvRsn = 'ACQ-VALD')
                             THEN d.LineAmount * CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing > 0 THEN h.Fixing ELSE 1 END
                             ELSE 0 END) AS ValAcqPuro,
-                   SUM(CASE WHEN h.WAPMovementType = 2032533506 THEN d.Qty ELSE 0 END) AS QtaVend,
+                   -- VENDITE (506): si ESCLUDE il cliente 70209 (AMAZON LOGISTICA) = gamba di USCITA del
+                   -- trasferimento FBA, non una vendita -> va in QtaTrasfFBA, non in QtaVend.
+                   SUM(CASE WHEN h.WAPMovementType = 2032533506 AND h.CustSupp <> '70209' THEN d.Qty ELSE 0 END) AS QtaVend,
                    SUM(CASE WHEN h.WAPMovementType = 2032533509 THEN d.Qty ELSE 0 END) AS QtaResi,
-                   -- RETTIFICHE/TRASFERIMENTI con SEGNO (a costo-neutro: entrano/escono al WAP del periodo).
-                   -- +: CAR-AMA (carico Amazon FBA), KLRI-P-A / RI-POS (rettifiche inventario positive).
+                   -- RETTIFICHE con SEGNO (a costo-neutro: entrano/escono al WAP del periodo).
+                   -- +: KLRI-P-A / RI-POS (rettifiche inventario positive).
                    -- -: KLRI-N-A / RI-NEG (rettifiche negative), KLR-FORA (reso a fornitore, merce che esce).
                    -- IGNORATI: KL-TRASF (spostamento ubicazione dentro ATRI), MOV-DEP (mov. tra depositi),
                    --           KRETASS+/- (rettifiche di assegnazione). KLVEN-OA resta vendita (-, tipo 506).
-                   SUM(CASE WHEN h.InvRsn IN ('CAR-AMA','KLRI-P-A','RI-POS')  THEN d.Qty
+                   SUM(CASE WHEN h.InvRsn IN ('KLRI-P-A','RI-POS')  THEN d.Qty
                             WHEN h.InvRsn IN ('KLRI-N-A','RI-NEG','KLR-FORA') THEN -d.Qty
-                            ELSE 0 END) AS QtaRettTrasf
+                            ELSE 0 END) AS QtaRettTrasf,
+                   -- TRASFERIMENTO FBA Amazon (costo-neutro, NON vendita): netto delle due gambe ->
+                   -- + CAR-AMA (carico deposito Amazon, 507), − scarico ATRI (506 al cliente 70209).
+                   -- Se le gambe sono sincronizzate il netto e' ~0; lo sbilancio e' un trasferimento incompleto/sfasato.
+                   SUM(CASE WHEN h.InvRsn = 'CAR-AMA' THEN d.Qty
+                            WHEN h.WAPMovementType = 2032533506 AND h.CustSupp = '70209' THEN -d.Qty
+                            ELSE 0 END) AS QtaTrasfFBA
             FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = d.EntryId
             WHERE YEAR(h.PostingDate) = @Anno AND MONTH(h.PostingDate) = @m
@@ -233,13 +246,14 @@ BEGIN
         calc AS (
             SELECT i.Item, i.QtaIniz, i.ValPuroIniz, i.ValOneriIniz,
                    ISNULL(mv.QtaAcq,0) AS QtaAcq, ISNULL(mv.ValAcqPuro,0) AS ValAcqPuro, ISNULL(mv.ValAcqOneri,0) AS ValAcqOneri,
-                   ISNULL(mv.QtaVend,0) AS QtaVend, ISNULL(mv.QtaResi,0) AS QtaResi, ISNULL(mv.QtaRettTrasf,0) AS QtaRettTrasf
+                   ISNULL(mv.QtaVend,0) AS QtaVend, ISNULL(mv.QtaResi,0) AS QtaResi, ISNULL(mv.QtaRettTrasf,0) AS QtaRettTrasf,
+                   ISNULL(mv.QtaTrasfFBA,0) AS QtaTrasfFBA
             FROM iniz i LEFT JOIN mv ON mv.Item = i.Item
         )
         INSERT INTO kodice.wap_ricalc
-            (Item,Anno,Mese,QtaIniz,ValPuroIniz,ValOneriIniz,QtaAcq,ValAcqPuro,ValAcqOneri,QtaVend,QtaResi,QtaRettTrasf,
+            (Item,Anno,Mese,QtaIniz,ValPuroIniz,ValOneriIniz,QtaAcq,ValAcqPuro,ValAcqOneri,QtaVend,QtaResi,QtaRettTrasf,QtaTrasfFBA,
              QtaFin,ValPuroFin,ValOneriFin,PuroUnit,OneriUnit,WAPCost_ricalc,WAPCost_Mago,Delta)
-        SELECT c.Item, @Anno, @m, c.QtaIniz, c.ValPuroIniz, c.ValOneriIniz, c.QtaAcq, c.ValAcqPuro, c.ValAcqOneri, c.QtaVend, c.QtaResi, c.QtaRettTrasf,
+        SELECT c.Item, @Anno, @m, c.QtaIniz, c.ValPuroIniz, c.ValOneriIniz, c.QtaAcq, c.ValAcqPuro, c.ValAcqOneri, c.QtaVend, c.QtaResi, c.QtaRettTrasf, c.QtaTrasfFBA,
                u.qtafin,
                u.puro_unit * u.qtafin, u.oneri_unit * u.qtafin,
                u.puro_unit, u.oneri_unit, (u.puro_unit + u.oneri_unit),
@@ -249,14 +263,14 @@ BEGIN
         CROSS APPLY (SELECT
                 CASE WHEN (c.QtaIniz + c.QtaAcq) <> 0 THEN (c.ValPuroIniz  + c.ValAcqPuro)  / (c.QtaIniz + c.QtaAcq) ELSE 0 END AS puro_unit,
                 CASE WHEN (c.QtaIniz + c.QtaAcq) <> 0 THEN (c.ValOneriIniz + c.ValAcqOneri) / (c.QtaIniz + c.QtaAcq) ELSE 0 END AS oneri_unit,
-                (c.QtaIniz + c.QtaAcq - c.QtaVend + c.QtaResi + c.QtaRettTrasf) AS qtafin) u
+                (c.QtaIniz + c.QtaAcq - c.QtaVend + c.QtaResi + c.QtaRettTrasf + c.QtaTrasfFBA) AS qtafin) u
         LEFT JOIN (
             SELECT LTRIM(RTRIM(Item)) AS Item, MAX(WAPCost) AS WAPCost
             FROM KODICEBAGNO_4.dbo.MA_ItemsWAP
             WHERE Storage = '' AND YEAR(EndPeriodDate) = @Anno AND MONTH(EndPeriodDate) = @m
             GROUP BY LTRIM(RTRIM(Item))
         ) wm ON wm.Item = c.Item
-        WHERE c.QtaIniz <> 0 OR c.QtaAcq <> 0 OR c.QtaVend <> 0 OR c.QtaResi <> 0 OR c.QtaRettTrasf <> 0;
+        WHERE c.QtaIniz <> 0 OR c.QtaAcq <> 0 OR c.QtaVend <> 0 OR c.QtaResi <> 0 OR c.QtaRettTrasf <> 0 OR c.QtaTrasfFBA <> 0;
 
         SET @m += 1;
     END

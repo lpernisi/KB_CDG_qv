@@ -734,9 +734,10 @@ def api_riconciliazione_cogs():
     cogs = fn(righe("SELECT SUM(ricavo_netto-mdc1) v FROM core.fatto_riga WHERE anno=:a AND mese BETWEEN :d AND :h",
                     a=anno, d=mda, h=ma)[0]["v"])
     w = righe("""SELECT SUM(QtaVend*WAPCost_ricalc) vend, SUM(QtaResi*WAPCost_ricalc) resi,
-                        SUM(QtaRettTrasf*WAPCost_ricalc) rett, SUM(ValAcqPuro+ValAcqOneri) acq
+                        SUM(QtaRettTrasf*WAPCost_ricalc) rett, SUM(ValAcqPuro+ValAcqOneri) acq,
+                        SUM(QtaTrasfFBA*WAPCost_ricalc) trasf
                  FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]
-    vend = fn(w["vend"]); resi = fn(w["resi"]); rett = fn(w["rett"]); acq = fn(w["acq"])
+    vend = fn(w["vend"]); resi = fn(w["resi"]); rett = fn(w["rett"]); acq = fn(w["acq"]); trasf_fba = fn(w["trasf"])
     rin_n = fn(righe("SELECT SUM(ValPuroIniz+ValOneriIniz) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:d", a=anno, d=mda)[0]["v"])
     rfin_n = fn(righe("SELECT SUM(ValPuroFin+ValOneriFin) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:h", a=anno, h=ma)[0]["v"])
     gl_acq = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
@@ -761,7 +762,8 @@ def api_riconciliazione_cogs():
         {"n": 3, "k": "fisico", "label": "= Costo del venduto FISICO (scarico magazzino vendite)", "val": r(vend), "tot": True, "drill": True},
         {"n": 4, "k": "rett", "label": "+ Rettifiche / perdite di magazzino (non vendita)", "val": r(-rett), "drill": True},
         {"n": 5, "k": "resi", "label": "− Resi da clienti (rientro merce)", "val": r(-resi), "drill": True},
-        {"n": 6, "k": "consfis", "label": "= Consumo materie (flusso fisico magazzino)", "val": r(consumo_fisico), "tot": True},
+        {"n": 6, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
+        {"n": 7, "k": "consfis", "label": "= Consumo materie (flusso fisico magazzino)", "val": r(consumo_fisico), "tot": True},
         {"n": 7, "k": "ricnf", "label": "− Maggior carico vs fatture acquisto (ricevuto-non-fatturato)", "val": r(-(acq - gl_acq)), "drill": True},
         {"n": 8, "k": "apert", "label": "+ Allineamento valorizzazione apertura (drift report Mago)", "val": r((rin_b - rin_n) + (rfin_n - rfin_b)), "drill": True},
         {"n": 9, "k": "bilancio", "label": "= Consumo materie a BILANCIO (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
@@ -817,6 +819,26 @@ def api_riconciliazione_drill():
             FROM ship s LEFT JOIN own o ON o.Item=s.Item LEFT JOIN kitimp ki ON ki.Item=s.Item
             WHERE ABS((s.qty-(ISNULL(o.q,0)+ISNULL(ki.q,0)))*ISNULL(s.costo,0))>1
             ORDER BY ABS((s.qty-(ISNULL(o.q,0)+ISNULL(ki.q,0)))*ISNULL(s.costo,0)) DESC""", a=anno, d=mda, h=ma))
+    if k == "fba":
+        # CONTROLLO trasferimenti FBA: per articolo, gamba USCITA (scarico ATRI -> cliente 70209) vs
+        # gamba CARICO (CAR-AMA su deposito Amazon). Mostra solo gli articoli NON sincronizzati = lo sbilancio
+        # (trasferimenti incompleti / sfasati nel tempo) da evidenziare. Fonte: kodice.vw_fba_movimenti (leggera).
+        return jsonify(righe("""
+            SELECT Item, ROUND(uscita_atri,0) AS uscita_atri, ROUND(carico_amazon,0) AS carico_amazon,
+                   ROUND(carico_amazon-uscita_atri,0) AS differenza_qta,
+                   ROUND((carico_amazon-uscita_atri)*ISNULL(costo,0),2) AS valore
+            FROM (
+                SELECT v.Item,
+                       SUM(CASE WHEN v.Gamba='USCITA_ATRI'   THEN v.Qta ELSE 0 END) AS uscita_atri,
+                       SUM(CASE WHEN v.Gamba='CARICO_AMAZON' THEN v.Qta ELSE 0 END) AS carico_amazon,
+                       MAX(cm.Costo) AS costo
+                FROM kodice.vw_fba_movimenti v
+                LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=v.Item AND cm.Anno=v.Anno AND cm.Mese=v.Mese
+                WHERE v.Anno=:a AND v.Mese BETWEEN :d AND :h
+                GROUP BY v.Item
+            ) t
+            WHERE uscita_atri <> carico_amazon
+            ORDER BY ABS(carico_amazon-uscita_atri) DESC""", a=anno, d=mda, h=ma))
     if k in ("rett", "resi"):
         tipo = 2032533507 if k == "rett" else 2032533509
         return jsonify(righe("""SELECT TOP 300 h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item,
