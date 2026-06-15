@@ -760,7 +760,7 @@ def api_riconciliazione_cogs():
         {"n": 1, "k": "cogs", "label": "Costo del venduto CDG (abbinato al fatturato)", "val": r(cogs), "tot": True, "drill": True},
         {"n": 2, "k": "sped", "label": "+ Merce spedita non ancora fatturata (sfasamento vendite)", "val": r(vend - cogs), "drill": True},
         {"n": 3, "k": "fisico", "label": "= Costo del venduto FISICO (scarico magazzino vendite)", "val": r(vend), "tot": True, "drill": True},
-        {"n": 4, "k": "rett", "label": "+ Rettifiche / perdite di magazzino (non vendita)", "val": r(-rett), "drill": True},
+        {"n": 4, "k": "rett", "label": "+ Rettifiche e consumi non-vendita (imballaggi, inventari di fine mese)", "val": r(-rett), "drill": True},
         {"n": 5, "k": "resi", "label": "− Resi da clienti (rientro merce)", "val": r(-resi), "drill": True},
         {"n": 6, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
         {"n": 7, "k": "consfis", "label": "= Consumo materie (flusso fisico magazzino)", "val": r(consumo_fisico), "tot": True},
@@ -782,22 +782,45 @@ def api_riconciliazione_drill():
     """Drill-down di una riga del prospetto: lista articoli/documenti che la compongono."""
     anno, mda, ma = _ric_periodo()
     k = request.args.get("k", "")
+    fn = lambda v: float(v or 0)
+
+    def _con_resto(rows, totale):
+        # Garantisce che il dettaglio sommi ESATTAMENTE alla riga del ponte: i primi (per impatto) + una riga
+        # "residuo" che assorbe la coda troncata e gli arrotondamenti. Poi separa i segni: prima i −, poi i +.
+        resto = round(fn(totale) - sum(fn(x.get("valore")) for x in rows), 2)
+        if abs(resto) >= 0.005:
+            extra = {c: None for c in (rows[0].keys() if rows else ["Item", "valore"])}
+            extra["Item"] = "— residuo (coda troncata + arrotondamenti) —"
+            extra["valore"] = resto
+            rows = rows + [extra]
+        for x in rows:                              # uniforma a float (evita Decimal->stringa in JSON)
+            x["valore"] = round(fn(x.get("valore")), 2)
+        return sorted(rows, key=lambda x: (0 if x["valore"] < 0 else 1, -abs(x["valore"])))
+
     if k == "cogs":
-        return jsonify(righe("""SELECT TOP 300 codice_articolo AS Item, SUM(quantita) AS qta,
+        tot = fn(righe("SELECT SUM(ricavo_netto-mdc1) v FROM core.fatto_riga WHERE anno=:a AND mese BETWEEN :d AND :h",
+                       a=anno, d=mda, h=ma)[0]["v"])
+        rows = righe("""SELECT TOP 300 codice_articolo AS Item, SUM(quantita) AS qta,
             ROUND(SUM(ricavo_netto-mdc1),2) AS valore FROM core.fatto_riga
-            WHERE anno=:a AND mese BETWEEN :d AND :h AND tipo_articolo='MERCE'
-            GROUP BY codice_articolo HAVING SUM(ricavo_netto-mdc1)<>0 ORDER BY SUM(ricavo_netto-mdc1) DESC""", a=anno, d=mda, h=ma))
+            WHERE anno=:a AND mese BETWEEN :d AND :h
+            GROUP BY codice_articolo HAVING SUM(ricavo_netto-mdc1)<>0
+            ORDER BY ABS(SUM(ricavo_netto-mdc1)) DESC""", a=anno, d=mda, h=ma)
+        return jsonify(_con_resto(rows, tot))
     if k == "fisico":
-        # costo del venduto fisico = scarico vendite 506 per articolo (componenti per i kit), a costo certificato
-        return jsonify(righe("""
+        # Costo del venduto FISICO = scarico vendite 506 per articolo, ESCLUSO il trasferimento FBA (cliente 70209),
+        # valorizzato allo STESSO costo della riga (WAPCost_ricalc). Top 300 + residuo -> somma = riga esatta.
+        tot = fn(righe("SELECT SUM(QtaVend*WAPCost_ricalc) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h",
+                       a=anno, d=mda, h=ma)[0]["v"])
+        rows = righe("""
             SELECT TOP 300 LTRIM(RTRIM(d.Item)) AS Item, ROUND(SUM(d.Qty),0) AS qta_spedita,
-                   ROUND(SUM(d.Qty*ISNULL(cm.Costo,0)),2) AS valore
+                   ROUND(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
             FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
-            LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=LTRIM(RTRIM(d.Item)) AND cm.Anno=:a AND cm.Mese=MONTH(h.PostingDate)
-            WHERE h.WAPMovementType=2032533506 AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
-            GROUP BY LTRIM(RTRIM(d.Item)) HAVING ABS(SUM(d.Qty*ISNULL(cm.Costo,0)))>1
-            ORDER BY SUM(d.Qty*ISNULL(cm.Costo,0)) DESC""", a=anno, d=mda, h=ma))
+            LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
+            WHERE h.WAPMovementType=2032533506 AND h.CustSupp<>'70209' AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+            GROUP BY LTRIM(RTRIM(d.Item)) HAVING ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)))>0.5
+            ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma)
+        return jsonify(_con_resto(rows, tot))
     if k == "sped":
         # spedito-non-fatturato PER ARTICOLO, ribaltando i componenti sul KIT venduto:
         # spedito (scarico 506) vs fatturato-equivalente (vendita diretta + come componente di kit venduti).
@@ -823,33 +846,58 @@ def api_riconciliazione_drill():
         # CONTROLLO trasferimenti FBA: per articolo, gamba USCITA (scarico ATRI -> cliente 70209) vs
         # gamba CARICO (CAR-AMA su deposito Amazon). Mostra solo gli articoli NON sincronizzati = lo sbilancio
         # (trasferimenti incompleti / sfasati nel tempo) da evidenziare. Fonte: kodice.vw_fba_movimenti (leggera).
-        return jsonify(righe("""
+        # Valore allo STESSO costo della riga (WAPCost_ricalc, per item/mese) e col SEGNO della riga
+        # (riga = −trasf_fba): valore = −Σ[(carico − uscita) × WAPCost]. Nessun filtro sulle qty (una gamba
+        # puo' cadere in un mese diverso → qty pari ma valore ≠0): si tengono tutti gli item con valore ≠ 0,
+        # cosi' il dettaglio somma ESATTAMENTE alla riga. Ordinato per segno (− poi +).
+        fba_tot = fn(righe("SELECT -SUM(QtaTrasfFBA*WAPCost_ricalc) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h", a=anno, d=mda, h=ma)[0]["v"])
+        return jsonify(_con_resto(righe("""
             SELECT Item, ROUND(uscita_atri,0) AS uscita_atri, ROUND(carico_amazon,0) AS carico_amazon,
-                   ROUND(carico_amazon-uscita_atri,0) AS differenza_qta,
-                   ROUND((carico_amazon-uscita_atri)*ISNULL(costo,0),2) AS valore
+                   ROUND(carico_amazon-uscita_atri,0) AS differenza_qta, ROUND(valore,2) AS valore
             FROM (
                 SELECT v.Item,
                        SUM(CASE WHEN v.Gamba='USCITA_ATRI'   THEN v.Qta ELSE 0 END) AS uscita_atri,
                        SUM(CASE WHEN v.Gamba='CARICO_AMAZON' THEN v.Qta ELSE 0 END) AS carico_amazon,
-                       MAX(cm.Costo) AS costo
+                       -SUM(CASE WHEN v.Gamba='CARICO_AMAZON' THEN v.Qta ELSE -v.Qta END * ISNULL(wr.WAPCost_ricalc,0)) AS valore
                 FROM kodice.vw_fba_movimenti v
-                LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=v.Item AND cm.Anno=v.Anno AND cm.Mese=v.Mese
+                LEFT JOIN kodice.wap_ricalc wr ON wr.Item=v.Item AND wr.Anno=v.Anno AND wr.Mese=v.Mese
                 WHERE v.Anno=:a AND v.Mese BETWEEN :d AND :h
                 GROUP BY v.Item
             ) t
-            WHERE uscita_atri <> carico_amazon
-            ORDER BY ABS(carico_amazon-uscita_atri) DESC""", a=anno, d=mda, h=ma))
+            WHERE ABS(valore) >= 0.005
+            ORDER BY ABS(valore) DESC""", a=anno, d=mda, h=ma), fba_tot))
     if k in ("rett", "resi"):
-        tipo = 2032533507 if k == "rett" else 2032533509
-        return jsonify(righe("""SELECT TOP 300 h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item,
-            ROUND(SUM(d.Qty),0) AS qta, ROUND(SUM(d.Qty*ISNULL(cm.Costo,0)),2) AS valore
+        if k == "rett":
+            # ESATTAMENTE come la riga: stesse causali e SEGNO dell'engine QtaRettTrasf (+ KLRI-P-A/RI-POS,
+            # − KLRI-N-A/RI-NEG/KLR-FORA), valorizzate allo STESSO costo della riga (WAPCost_ricalc da wap_ricalc),
+            # senza troncamenti -> il dettaglio somma ESATTAMENTE all'intestazione. Ordinato per SEGNO (− poi +).
+            # CAR-AMA NON e' qui (trasferimento FBA, riga dedicata).
+            rett_tot = fn(righe("SELECT -SUM(QtaRettTrasf*WAPCost_ricalc) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h", a=anno, d=mda, h=ma)[0]["v"])
+            return jsonify(_con_resto(righe("""SELECT h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item,
+                ROUND(SUM(d.Qty),0) AS qta,
+                ROUND(SUM(CASE WHEN h.InvRsn IN ('KLRI-N-A','RI-NEG','KLR-FORA') THEN d.Qty ELSE -d.Qty END
+                             * ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
+                FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
+                JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
+                LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
+                WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ('KLRI-P-A','RI-POS','KLRI-N-A','RI-NEG','KLR-FORA')
+                  AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+                GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
+                ORDER BY CASE WHEN SUM(CASE WHEN h.InvRsn IN ('KLRI-N-A','RI-NEG','KLR-FORA') THEN d.Qty ELSE -d.Qty END
+                              * ISNULL(wr.WAPCost_ricalc,0)) < 0 THEN 0 ELSE 1 END,
+                         ABS(SUM(CASE WHEN h.InvRsn IN ('KLRI-N-A','RI-NEG','KLR-FORA') THEN d.Qty ELSE -d.Qty END
+                              * ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma), rett_tot))
+        # RESI (509): contribuiscono col segno − al consumo (rientro merce) -> valore negato per sommare alla riga.
+        resi_tot = fn(righe("SELECT -SUM(QtaResi*WAPCost_ricalc) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h", a=anno, d=mda, h=ma)[0]["v"])
+        return jsonify(_con_resto(righe("""SELECT h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item,
+            ROUND(SUM(d.Qty),0) AS qta, ROUND(-SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
             FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
-            LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=LTRIM(RTRIM(d.Item)) AND cm.Anno=:a AND cm.Mese=MONTH(h.PostingDate)
-            WHERE h.WAPMovementType=:t AND h.InvRsn NOT IN ('MOV-DEP','KL-TRASF')
+            LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
+            WHERE h.WAPMovementType=2032533509
               AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
-            GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item)) HAVING ABS(SUM(d.Qty*ISNULL(cm.Costo,0)))>1
-            ORDER BY ABS(SUM(d.Qty*ISNULL(cm.Costo,0))) DESC""", a=anno, t=tipo, d=mda, h=ma))
+            GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
+            ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma), resi_tot))
     if k == "ricnf":
         return jsonify(righe("""SELECT TOP 300 h.Supplier AS fornitore, h.DocNo AS bolla, h.DocumentDate AS data,
             ROUND(SUM(d.TaxableAmount),2) AS valore
