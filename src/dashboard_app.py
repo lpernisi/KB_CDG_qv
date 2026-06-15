@@ -862,10 +862,10 @@ def api_riconciliazione_cogs():
     _ini = datetime.date(anno, mda, 1)
     _fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
     vlb = righe("""SELECT
-        ISNULL(SUM(CASE WHEN vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini
+        ISNULL(SUM(CASE WHEN vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.InternalOrdNo NOT LIKE '1300%' AND vl.FatturaDate < :ini
                         THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) apertura,
-        ISNULL(SUM(CASE WHEN vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE') THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) residuo,
-        ISNULL(SUM(CASE WHEN vl.Modo='SOSTITUZIONE' THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) sost
+        ISNULL(SUM(CASE WHEN vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE') AND vl.InternalOrdNo NOT LIKE '1300%' THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) residuo,
+        ISNULL(SUM(CASE WHEN vl.Modo='SOSTITUZIONE' OR vl.InternalOrdNo LIKE '1300%' THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) sost
         FROM kodice.vendite_link vl
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=vl.MovEntryId
         LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(vl.MovDate)
@@ -879,7 +879,6 @@ def api_riconciliazione_cogs():
     # certificato vs contabilita') ancora da dettagliare per articolo.
     comp = [
         {"k": "uscita_ddt", "label": "+ Merce USCITA nel periodo ma NON in COGS (spedito su DDT/ordine, fattura prima o differita non ancora emessa)", "val": r(sped_ap + sped_res), "drill": True},
-        {"k": "sost", "label": "+ Sostituzioni gratuite (DDT senza fattura: 0 ricavo, costo valorizzato = perdita)", "val": r(sped_sost), "drill": True},
         {"k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (perdite, inventari di fine mese)", "val": r(rett_n), "drill": True},
         {"k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
         {"k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
@@ -894,7 +893,7 @@ def api_riconciliazione_cogs():
     ]
     spiegato = cogs + sum(c["val"] for c in comp)
     non_giust = consumo_bil - spiegato                     # NON forzato a zero: e' il vero scarto non spiegato
-    righe_out = ([{"n": 1, "k": "cogs", "label": "Costo del venduto CDG — X (abbinato al fatturato)", "val": r(cogs), "tot": True, "drill": True}]
+    righe_out = ([{"n": 1, "k": "cogs", "label": "Costo del venduto CDG — X (abbinato al fatturato, incl. sostituzioni gratuite a ricavo 0)", "val": r(cogs), "tot": True, "drill": True}]
                  + [dict(c, n=i + 2) for i, c in enumerate(comp)]
                  + [{"n": len(comp) + 2, "k": "spiegato", "label": "= Totale spiegato (X + componenti misurate)", "val": r(spiegato), "tot": True},
                     {"n": len(comp) + 3, "k": "non_giust", "label": "≠ DIFFERENZA NON GIUSTIFICATA (Y − spiegato) — scarto reale, da dettagliare", "val": r(non_giust), "drill": False},
@@ -1139,6 +1138,7 @@ def api_riconciliazione_drill():
                 LEFT JOIN kodice.wap_ricalc wr ON wr.Item = LTRIM(RTRIM(d.Item)) AND wr.Anno = :a AND wr.Mese = MONTH(vl.MovDate)
                 LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item = LTRIM(RTRIM(d.Item))
                 WHERE vl.MovDate >= :ini AND vl.MovDate < :fin1 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+                  AND vl.InternalOrdNo NOT LIKE '1300%'   -- 1300* = sostituzioni gratuite (vanno nella riga sost)
                   AND ((vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini)
                        OR vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE'))
             ) z GROUP BY spiegazione ORDER BY SUM(val) DESC""", a=anno, ini=ini, fin1=fin1))
@@ -1154,7 +1154,7 @@ def api_riconciliazione_drill():
             LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = h.CustSupp
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item = LTRIM(RTRIM(d.Item)) AND wr.Anno = :a AND wr.Mese = MONTH(vl.MovDate)
             LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item = LTRIM(RTRIM(d.Item))
-            WHERE vl.Modo = 'SOSTITUZIONE' AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO' AND vl.MovDate >= :ini AND vl.MovDate < :fin1
+            WHERE (vl.Modo = 'SOSTITUZIONE' OR vl.InternalOrdNo LIKE '1300%') AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO' AND vl.MovDate >= :ini AND vl.MovDate < :fin1
             GROUP BY ISNULL(cs.CompanyName, h.CustSupp)
             HAVING ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) > 0.005
             ORDER BY SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)) DESC""", a=anno, ini=ini, fin1=fin1))

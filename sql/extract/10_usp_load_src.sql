@@ -91,5 +91,32 @@ BEGIN
     FROM righe AS r
     JOIN agg AS a ON a.SaleDocId = r.SaleDocId
     WHERE r.tipo <> 'T';                                            -- righe trasporto: spalmate, non inserite
+
+    -- ---- SOSTITUZIONI GRATUITE -------------------------------------------------
+    -- Merce spedita gratis al cliente (garanzia/sostituzione): documenti di SOSTITUZIONE
+    -- (MA_SaleDoc DocumentType 3407873). NON hanno fattura -> 0 ricavo, ma il COSTO del
+    -- materiale e' una PERDITA e DEVE stare nel COGS: le carico come righe fatto con
+    -- ricavo_netto = 0; il componente COSTO_VENDUTO le valorizza (qta x costo certificato).
+    -- SELEZIONE = regola dell'estrattore QLIK (oracolo, vedi docs/estrattore-qlik.md, 2deg blocco):
+    --   (cliente NON B2B  AND ProjectCode NOT IN 3/4/5)  OR  (cliente B2B AND InvRsn LIKE 'KLSOST%').
+    --   ProjectCode 3/4/5 = suddivisione con RICARICO / cambio articolo / spostamenti -> NON sono regali.
+    --   B2B = categoria cliente 'BTOB' (MA_CustSuppCustomerOptions.Category = 'BTOB', "BTOB Tradizionale").
+    --   Esclusi intercompany + 149449/24209.
+    INSERT INTO src.righe_vendita (anno, mese, sale_doc_id, line, codice_articolo, tipo_articolo, quantita, ricavo_netto)
+    SELECT @anno, @mese, d.SaleDocId, d.Line, LTRIM(RTRIM(d.Item)),
+           CASE WHEN i.IsGood = 1 THEN 'MERCE' WHEN i.IsGood = 0 THEN 'SERVIZIO' ELSE 'ALTRO' END,
+           CAST(d.Qty AS DECIMAL(18,4)),                            -- quantita uscita (positiva, come una vendita)
+           0                                                        -- ricavo 0: sostituzione gratuita
+    FROM KODICEBAGNO_4.dbo.MA_SaleDocDetail AS d
+    JOIN KODICEBAGNO_4.dbo.MA_SaleDoc AS t ON t.SaleDocId = d.SaleDocId
+    LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions AS opt
+           ON opt.Customer = t.CustSupp AND opt.CustSuppType = 3211264
+    LEFT JOIN KODICEBAGNO_4.dbo.MA_Items AS i ON i.Item = LTRIM(RTRIM(d.Item))
+    WHERE t.DocumentType = '3407873'
+      AND ( (ISNULL(opt.Category,'') <> 'BTOB' AND t.ProjectCode NOT IN ('3','4','5'))
+            OR (opt.Category = 'BTOB' AND t.InvRsn LIKE 'KLSOST%') )
+      AND t.CustSupp NOT IN ('KODICEFR','KODICEDE','KODICEES','149449','24209')
+      AND YEAR(t.DocumentDate) = @anno AND MONTH(t.DocumentDate) = @mese
+      AND LTRIM(RTRIM(d.Item)) <> '';
 END
 GO
