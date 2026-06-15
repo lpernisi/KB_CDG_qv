@@ -100,13 +100,18 @@ BEGIN
              AND (sd.CustSupp = ord.Customer OR sd.CustSupp = ord.InvoicingCustomer)        UNION ALL
         SELECT ord.EntryId, sd.SaleDocId, CAST(sd.DocumentDate AS date), sd.DocumentType, 2  -- AMAZON (1 salto)
         FROM ordine ord
+        -- SOLO derivazioni VERE ordine->fattura: 27066387 Fattura Immediata, 27066391 Ricevuta Fiscale, 27066389 Nota Credito.
+        -- (escluso 27066370 "Movimento Magazzino" generico e altri tipi contabili: pescavano fatture sbagliate/vecchie.)
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences xf ON xf.OriginDocID = ord.SaleOrdId
+             AND xf.DerivedDocType IN (27066387,27066391,27066389)
         JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = xf.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)
              AND (sd.CustSupp = ord.Customer OR sd.CustSupp = ord.InvoicingCustomer)        UNION ALL
         SELECT ord.EntryId, sd.SaleDocId, CAST(sd.DocumentDate AS date), sd.DocumentType, 3  -- B2B via DDT (2 salti)
         FROM ordine ord
-        JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x1 ON x1.OriginDocID = ord.SaleOrdId
+        -- 1deg salto ordine->DDT (27066383 Documento di Trasporto), 2deg salto DDT->fattura (tipi fattura veri).
+        JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x1 ON x1.OriginDocID = ord.SaleOrdId AND x1.DerivedDocType = 27066383
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID = x1.DerivedDocID
+             AND x2.DerivedDocType IN (27066387,27066391,27066389)
         JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = x2.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)
              AND (sd.CustSupp = ord.Customer OR sd.CustSupp = ord.InvoicingCustomer)    ),
     -- scelta UNICA per movimento: priorita' (0 DocNo diretto, 1 B2C, 2 Amazon, 3 B2B), poi fattura piu' vicina

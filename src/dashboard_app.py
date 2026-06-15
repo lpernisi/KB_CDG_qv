@@ -894,9 +894,8 @@ def api_riconciliazione_cogs():
         {"k": "ricnf_dopo", "label": "+ Ricevuto e fatturato DOPO il periodo (fatture fornitori di giugno+) — da verificare", "val": r(-ab["dopo"]), "drill": True},
         {"k": "glnodoc", "label": "± Registrazioni a conto materiale SENZA documento (giroconti contabili: es. \"merci in transito\")", "val": r(ab["glnodoc"]), "drill": True},
         {"k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (GL dazi/trasporti import − nostro carico) — da approfondire", "val": r(oneri_contrib), "drill": True},
-        # -- bassa certezza: aggancio crossref inaffidabile / valutazione da dettagliare --
-        {"k": "ricnf_prec", "label": "− Fatturato in periodo precedente — INAFFIDABILE: il link aggancia fatture vecchie (es. MAVAW 1 anno)", "val": r(-ab["prec"]), "drill": True},
-        {"k": "uscita_ddt", "label": "+ Spedito non fatturato (DDT/ordine) — INAFFIDABILE: link movimento→fattura, da rifare su VwKLStatoOrdini", "val": r(sped_ap + sped_res), "drill": True},
+        {"k": "ricnf_prec", "label": "− Acquisti: merce ricevuta nel periodo, fattura registrata in periodo precedente (cross-anno reale dic→gen)", "val": r(-ab["prec"]), "drill": True},
+        {"k": "uscita_ddt", "label": "+ Merce uscita NON in COGS: B2C cross-anno (ricevuta dic, spedita gen) + B2B fattura differita / ordini annullati", "val": r(sped_ap + sped_res), "drill": True},
     ]
     spiegato = cogs + sum(c["val"] for c in comp)
     non_giust = consumo_bil - spiegato                     # NON forzato a zero: e' il vero scarto non spiegato
