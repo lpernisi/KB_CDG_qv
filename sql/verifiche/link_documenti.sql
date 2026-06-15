@@ -35,10 +35,11 @@ CREATE TABLE kodice.vendite_link (
     SaleOrdId     int          NULL,
     InternalOrdNo varchar(21)  NULL,
     OrderDate     date         NULL,
+    OrderInvRsn   varchar(20)  NULL,
     FatturaId     int          NULL,
     FatturaDate   date         NULL,
     FatturaType   int          NULL,
-    Modo          varchar(20)  NOT NULL,   -- B2C / AMAZON / B2B_DDT / SOLO_ORDINE / NESSUN_ORDINE
+    Modo          varchar(20)  NOT NULL,   -- B2C / AMAZON / B2B_DDT / SOSTITUZIONE / SOLO_ORDINE / NESSUN_ORDINE
     CONSTRAINT PK_vendite_link PRIMARY KEY (MovEntryId)
 );
 GO
@@ -57,16 +58,21 @@ BEGIN
         FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
         WHERE h.WAPMovementType = 2032533506 AND YEAR(h.PostingDate) = @Anno AND h.CustSupp <> '70209'
     ),
-    -- GAMBA SEMPRE PRESENTE: movimento -> ordine cliente (CrossReferences: ordine Origin -> movimento Derived).
+    -- GAMBA SEMPRE PRESENTE: movimento -> ordine cliente, in 2 modi (priorita': CrossRef, poi OrderId sul dettaglio).
     -- Se piu' ordini, si tiene quello con data piu' vicina al movimento.
     ordine AS (
-        SELECT EntryId, SaleOrdId, InternalOrdNo, OrderDate FROM (
-            SELECT mov.EntryId, o.SaleOrdId, o.InternalOrdNo, CAST(o.OrderDate AS date) AS OrderDate,
-                   ROW_NUMBER() OVER (PARTITION BY mov.EntryId
-                                      ORDER BY ABS(DATEDIFF(day, mov.MovDate, o.OrderDate))) AS rn
-            FROM mov
-            JOIN KODICEBAGNO_4.dbo.MA_CrossReferences xo ON xo.DerivedDocID = mov.EntryId
-            JOIN KODICEBAGNO_4.dbo.MA_SaleOrd o ON o.SaleOrdId = xo.OriginDocID
+        SELECT EntryId, SaleOrdId, InternalOrdNo, OrderDate, OrderInvRsn FROM (
+            SELECT lk.EntryId, o.SaleOrdId, o.InternalOrdNo, CAST(o.OrderDate AS date) AS OrderDate, o.InvRsn AS OrderInvRsn,
+                   ROW_NUMBER() OVER (PARTITION BY lk.EntryId
+                                      ORDER BY lk.prio, ABS(DATEDIFF(day, lk.MovDate, o.OrderDate))) AS rn
+            FROM (
+                SELECT mov.EntryId, mov.MovDate, xo.OriginDocID AS SaleOrdId, 1 AS prio
+                FROM mov JOIN KODICEBAGNO_4.dbo.MA_CrossReferences xo ON xo.DerivedDocID = mov.EntryId
+                UNION ALL
+                SELECT mov.EntryId, mov.MovDate, dd.OrderId, 2 AS prio
+                FROM mov JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail dd ON dd.EntryId = mov.EntryId AND dd.OrderId <> 0
+            ) lk
+            JOIN KODICEBAGNO_4.dbo.MA_SaleOrd o ON o.SaleOrdId = lk.SaleOrdId
         ) q WHERE rn = 1
     ),
     -- ORDINE -> FATTURA in 3 modi
@@ -95,10 +101,11 @@ BEGIN
         FROM cand c JOIN ordine o ON o.EntryId = c.EntryId
     )
     INSERT INTO kodice.vendite_link
-        (MovEntryId, MovDate, SaleOrdId, InternalOrdNo, OrderDate, FatturaId, FatturaDate, FatturaType, Modo)
-    SELECT mov.EntryId, mov.MovDate, ord.SaleOrdId, ord.InternalOrdNo, ord.OrderDate,
+        (MovEntryId, MovDate, SaleOrdId, InternalOrdNo, OrderDate, OrderInvRsn, FatturaId, FatturaDate, FatturaType, Modo)
+    SELECT mov.EntryId, mov.MovDate, ord.SaleOrdId, ord.InternalOrdNo, ord.OrderDate, ord.OrderInvRsn,
            b.FatturaId, b.FatturaDate, b.FatturaType,
            CASE WHEN ord.SaleOrdId IS NULL THEN 'NESSUN_ORDINE'
+                WHEN ord.OrderInvRsn = 'KLSOSTA' THEN 'SOSTITUZIONE'   -- DDT solo, nessuna fattura per natura
                 WHEN b.FatturaId IS NULL THEN 'SOLO_ORDINE'
                 WHEN b.prio = 1 THEN 'B2C' WHEN b.prio = 2 THEN 'AMAZON' ELSE 'B2B_DDT' END
     FROM mov
