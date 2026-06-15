@@ -71,8 +71,9 @@ BEGIN
     -- VALIDAZIONE: il CLIENTE dell'ordine deve combaciare col cliente del movimento (uccide i link spuri del grafo
     -- verso ordini di altri clienti/anni). Se piu' ordini validi, si tiene quello con data piu' vicina al movimento.
     ordine AS (
-        SELECT EntryId, SaleOrdId, InternalOrdNo, OrderDate, OrderInvRsn, Customer FROM (
+        SELECT EntryId, SaleOrdId, InternalOrdNo, OrderDate, OrderInvRsn, Customer, InvoicingCustomer FROM (
             SELECT lk.EntryId, o.SaleOrdId, o.InternalOrdNo, CAST(o.OrderDate AS date) AS OrderDate, o.InvRsn AS OrderInvRsn, o.Customer,
+                   ISNULL(NULLIF(co.InvoicingCustomer,''), o.Customer) AS InvoicingCustomer,   -- cliente di FATTURAZIONE (anagrafica)
                    ROW_NUMBER() OVER (PARTITION BY lk.EntryId
                                       ORDER BY lk.prio, ABS(DATEDIFF(day, lk.MovDate, o.OrderDate))) AS rn
             FROM (
@@ -83,6 +84,7 @@ BEGIN
                 FROM mov JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail dd ON dd.EntryId = mov.EntryId AND dd.OrderId <> 0
             ) lk
             JOIN KODICEBAGNO_4.dbo.MA_SaleOrd o ON o.SaleOrdId = lk.SaleOrdId AND o.Customer = lk.CustSupp
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions co ON co.Customer = o.Customer
             WHERE ABS(DATEDIFF(day, lk.MovDate, o.OrderDate)) <= 180
         ) q WHERE rn = 1
     ),
@@ -94,16 +96,19 @@ BEGIN
                sd.DocumentType AS FatturaType, 1 AS prio  -- B2C
         FROM ordine ord
         JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON CAST(sd.SaleDocId AS varchar(21)) = ord.InternalOrdNo
-             AND sd.DocumentType IN (3407878,3407874,3407876)        UNION ALL
+             AND sd.DocumentType IN (3407878,3407874,3407876)
+             AND (sd.CustSupp = ord.Customer OR sd.CustSupp = ord.InvoicingCustomer)        UNION ALL
         SELECT ord.EntryId, sd.SaleDocId, CAST(sd.DocumentDate AS date), sd.DocumentType, 2  -- AMAZON (1 salto)
         FROM ordine ord
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences xf ON xf.OriginDocID = ord.SaleOrdId
-        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = xf.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)        UNION ALL
+        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = xf.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)
+             AND (sd.CustSupp = ord.Customer OR sd.CustSupp = ord.InvoicingCustomer)        UNION ALL
         SELECT ord.EntryId, sd.SaleDocId, CAST(sd.DocumentDate AS date), sd.DocumentType, 3  -- B2B via DDT (2 salti)
         FROM ordine ord
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x1 ON x1.OriginDocID = ord.SaleOrdId
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID = x1.DerivedDocID
-        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = x2.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)    ),
+        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = x2.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)
+             AND (sd.CustSupp = ord.Customer OR sd.CustSupp = ord.InvoicingCustomer)    ),
     -- scelta UNICA per movimento: priorita' (0 DocNo diretto, 1 B2C, 2 Amazon, 3 B2B), poi fattura piu' vicina
     -- alla data del MOVIMENTO; tetto 180 gg (no link spuri). Riferimento data = movimento (vale anche senza ordine).
     best AS (
