@@ -877,19 +877,24 @@ def api_riconciliazione_cogs():
     # misurate non spiegano resta una riga esplicita "DIFFERENZA NON GIUSTIFICATA" (= Y − X − Σcomponenti), che
     # PUO' essere diversa da zero. Tipicamente e' la differenza di valorizzazione (nostro ricalcolo vs costo
     # certificato vs contabilita') ancora da dettagliare per articolo.
+    # Righe ordinate per CERTEZZE DECRESCENTI (l'utente le legge dall'alto: prima le validate/chiare,
+    # poi quelle ancora da verificare, infine quelle inaffidabili da link/da dettagliare).
     comp = [
-        {"k": "uscita_ddt", "label": "+ Merce USCITA nel periodo ma NON in COGS (spedito su DDT/ordine, fattura prima o differita non ancora emessa)", "val": r(sped_ap + sped_res), "drill": True},
-        {"k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (perdite, inventari di fine mese)", "val": r(rett_n), "drill": True},
-        {"k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
-        {"k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
-        {"k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
-        {"k": "ricnf_prec", "label": "− Fatturato in periodo precedente (fattura già registrata prima, merce ricevuta nel periodo)", "val": r(-ab["prec"]), "drill": True},
-        {"k": "ricnf_dopo", "label": "− Ricevuto non fatturato: merce a magazzino, fattura emessa DOPO il periodo", "val": r(-ab["dopo"]), "drill": True},
-        {"k": "ricnf_nofatt", "label": "− Ricevuto non fatturato: merce a magazzino, nessuna fattura collegata", "val": r(-ab["nofatt"]), "drill": True},
-        {"k": "glnodoc", "label": "± Registrazioni a conto materiale SENZA documento (giroconti contabili: es. \"merci in transito\")", "val": r(ab["glnodoc"]), "drill": True},
-        {"k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (registrati in contabilità − nostro carico: dazi, trasporti import)", "val": r(oneri_contrib), "drill": True},
+        # -- alta certezza: validate e comprese --
         {"k": "rim_iniz", "label": "+ Differenza valutazione rimanenze INIZIALI (contabili − nostre)", "val": r(rin_b - rin_n), "drill": False},
         {"k": "rim_fin", "label": "+ Differenza valutazione rimanenze FINALI (nostre − contabili)", "val": r(rfin_n - rfin_b), "drill": False},
+        {"k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
+        {"k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (perdite, inventari di fine mese)", "val": r(rett_n), "drill": True},
+        {"k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
+        {"k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
+        {"k": "ricnf_nofatt", "label": "+ Ricevuto NON fatturato: bolle fornitore ancora da fatturare (nessuna fattura)", "val": r(-ab["nofatt"]), "drill": True},
+        # -- media certezza: chiare ma da verificare --
+        {"k": "ricnf_dopo", "label": "+ Ricevuto e fatturato DOPO il periodo (fatture fornitori di giugno+) — da verificare", "val": r(-ab["dopo"]), "drill": True},
+        {"k": "glnodoc", "label": "± Registrazioni a conto materiale SENZA documento (giroconti contabili: es. \"merci in transito\")", "val": r(ab["glnodoc"]), "drill": True},
+        {"k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (GL dazi/trasporti import − nostro carico) — da approfondire", "val": r(oneri_contrib), "drill": True},
+        # -- bassa certezza: aggancio crossref inaffidabile / valutazione da dettagliare --
+        {"k": "ricnf_prec", "label": "− Fatturato in periodo precedente — INAFFIDABILE: il link aggancia fatture vecchie (es. MAVAW 1 anno)", "val": r(-ab["prec"]), "drill": True},
+        {"k": "uscita_ddt", "label": "+ Spedito non fatturato (DDT/ordine) — INAFFIDABILE: link movimento→fattura, da rifare su VwKLStatoOrdini", "val": r(sped_ap + sped_res), "drill": True},
     ]
     spiegato = cogs + sum(c["val"] for c in comp)
     non_giust = consumo_bil - spiegato                     # NON forzato a zero: e' il vero scarto non spiegato
