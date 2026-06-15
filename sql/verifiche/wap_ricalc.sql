@@ -241,6 +241,7 @@ BEGIN
             FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = d.EntryId
             WHERE YEAR(h.PostingDate) = @Anno AND MONTH(h.PostingDate) = @m
+              AND h.CancelPhase1 = '0' AND h.CancelPhase2 = '0'   -- escludi movimenti ANNULLATI
             GROUP BY LTRIM(RTRIM(d.Item))
         ),
         calc AS (

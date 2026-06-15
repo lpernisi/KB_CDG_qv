@@ -737,6 +737,7 @@ _ACQ_CTE = """
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
         LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
         WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+          AND h.CancelPhase1='0' AND h.CancelPhase2='0'
           AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
         GROUP BY h.EntryId),
     m2b AS (SELECT DISTINCT c.EntryId, c.MovDate, x.OriginDocID AS BollaId
@@ -809,7 +810,7 @@ def api_riconciliazione_cogs():
         LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
         LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
         WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ('KLRI-P-A','RI-POS','KLRI-N-A','RI-NEG','KLR-FORA')
-          AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+          AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO' AND h.CancelPhase1='0' AND h.CancelPhase2='0'
           AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]
     rett_p = fn(pn["p"]); rett_n = fn(pn["n"])
     rin_n = fn(righe("""SELECT SUM(w.ValPuroIniz+w.ValOneriIniz) v FROM kodice.wap_ricalc w
@@ -953,6 +954,7 @@ def api_riconciliazione_drill():
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
             LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
             WHERE h.WAPMovementType=2032533506 AND h.CustSupp<>'70209' AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+              AND h.CancelPhase1='0' AND h.CancelPhase2='0'
               AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
             GROUP BY LTRIM(RTRIM(d.Item)) HAVING ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)))>0.5
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma)
@@ -968,6 +970,7 @@ def api_riconciliazione_drill():
                 LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=LTRIM(RTRIM(d.Item)) AND cm.Anno=:a AND cm.Mese=MONTH(h.PostingDate)
                 LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
                 WHERE h.WAPMovementType=2032533506 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+                  AND h.CancelPhase1='0' AND h.CancelPhase2='0'
                   AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
                 GROUP BY LTRIM(RTRIM(d.Item))),
             fr AS (SELECT f.codice_articolo AS cod, SUM(f.quantita) AS q FROM core.fatto_riga f
@@ -1022,6 +1025,7 @@ def api_riconciliazione_drill():
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
             LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
             WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ({causali}) AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+              AND h.CancelPhase1='0' AND h.CancelPhase2='0'
               AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
         rows = righe(f"""SELECT h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item, ROUND(SUM(d.Qty),0) AS qta,
             ROUND({seg}SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
@@ -1030,6 +1034,7 @@ def api_riconciliazione_drill():
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
             LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
             WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ({causali}) AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+              AND h.CancelPhase1='0' AND h.CancelPhase2='0'
               AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
             GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma)
@@ -1046,6 +1051,7 @@ def api_riconciliazione_drill():
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
             LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
             WHERE h.WAPMovementType=2032533509 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+              AND h.CancelPhase1='0' AND h.CancelPhase2='0'
               AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
             GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma), resi_tot))
