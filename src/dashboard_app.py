@@ -738,6 +738,17 @@ def api_riconciliazione_cogs():
                         SUM(QtaTrasfFBA*WAPCost_ricalc) trasf
                  FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]
     vend = fn(w["vend"]); resi = fn(w["resi"]); rett = fn(w["rett"]); acq = fn(w["acq"]); trasf_fba = fn(w["trasf"])
+    # Rettifiche scomposte in POSITIVE (rientri/aumenti) e NEGATIVE (consumi: imballaggi/perdite), dai 507 grezzi
+    # valorizzati come la riga (WAPCost_ricalc). rett_p+rett_n riproducono il netto rett (P − N).
+    pn = righe("""SELECT
+        ISNULL(SUM(CASE WHEN h.InvRsn IN ('KLRI-P-A','RI-POS') THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) p,
+        ISNULL(SUM(CASE WHEN h.InvRsn IN ('KLRI-N-A','RI-NEG','KLR-FORA') THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) n
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
+        LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
+        WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ('KLRI-P-A','RI-POS','KLRI-N-A','RI-NEG','KLR-FORA')
+          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]
+    rett_p = fn(pn["p"]); rett_n = fn(pn["n"])
     rin_n = fn(righe("SELECT SUM(ValPuroIniz+ValOneriIniz) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:d", a=anno, d=mda)[0]["v"])
     rfin_n = fn(righe("SELECT SUM(ValPuroFin+ValOneriFin) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:h", a=anno, h=ma)[0]["v"])
     gl_acq = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
@@ -760,8 +771,9 @@ def api_riconciliazione_cogs():
         {"n": 1, "k": "cogs", "label": "Costo del venduto CDG (abbinato al fatturato)", "val": r(cogs), "tot": True, "drill": True},
         {"n": 2, "k": "sped", "label": "+ Merce spedita non ancora fatturata (sfasamento vendite)", "val": r(vend - cogs), "drill": True},
         {"n": 3, "k": "fisico", "label": "= Costo del venduto FISICO (scarico magazzino vendite)", "val": r(vend), "tot": True, "drill": True},
-        {"n": 4, "k": "rett", "label": "+ Rettifiche e consumi non-vendita (imballaggi, inventari di fine mese)", "val": r(-rett), "drill": True},
-        {"n": 5, "k": "resi", "label": "− Resi da clienti (rientro merce)", "val": r(-resi), "drill": True},
+        {"n": 4, "k": "rettneg", "label": "+ Rettifiche negative — consumi non-vendita (imballaggi, perdite, inventari)", "val": r(rett_n), "drill": True},
+        {"n": 5, "k": "rettpos", "label": "− Rettifiche positive — rientri / aumenti d'inventario", "val": r(-rett_p), "drill": True},
+        {"n": 6, "k": "resi", "label": "− Resi da clienti (rientro merce)", "val": r(-resi), "drill": True},
         {"n": 6, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
         {"n": 7, "k": "consfis", "label": "= Consumo materie (flusso fisico magazzino)", "val": r(consumo_fisico), "tot": True},
         {"n": 7, "k": "ricnf", "label": "− Maggior carico vs fatture acquisto (ricevuto-non-fatturato)", "val": r(-(acq - gl_acq)), "drill": True},
@@ -866,27 +878,30 @@ def api_riconciliazione_drill():
             ) t
             WHERE ABS(valore) >= 0.005
             ORDER BY ABS(valore) DESC""", a=anno, d=mda, h=ma), fba_tot))
-    if k in ("rett", "resi"):
-        if k == "rett":
-            # ESATTAMENTE come la riga: stesse causali e SEGNO dell'engine QtaRettTrasf (+ KLRI-P-A/RI-POS,
-            # − KLRI-N-A/RI-NEG/KLR-FORA), valorizzate allo STESSO costo della riga (WAPCost_ricalc da wap_ricalc),
-            # senza troncamenti -> il dettaglio somma ESATTAMENTE all'intestazione. Ordinato per SEGNO (− poi +).
-            # CAR-AMA NON e' qui (trasferimento FBA, riga dedicata).
-            rett_tot = fn(righe("SELECT -SUM(QtaRettTrasf*WAPCost_ricalc) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h", a=anno, d=mda, h=ma)[0]["v"])
-            return jsonify(_con_resto(righe("""SELECT h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item,
-                ROUND(SUM(d.Qty),0) AS qta,
-                ROUND(SUM(CASE WHEN h.InvRsn IN ('KLRI-N-A','RI-NEG','KLR-FORA') THEN d.Qty ELSE -d.Qty END
-                             * ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
-                FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
-                JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
-                LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
-                WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ('KLRI-P-A','RI-POS','KLRI-N-A','RI-NEG','KLR-FORA')
-                  AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
-                GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
-                ORDER BY CASE WHEN SUM(CASE WHEN h.InvRsn IN ('KLRI-N-A','RI-NEG','KLR-FORA') THEN d.Qty ELSE -d.Qty END
-                              * ISNULL(wr.WAPCost_ricalc,0)) < 0 THEN 0 ELSE 1 END,
-                         ABS(SUM(CASE WHEN h.InvRsn IN ('KLRI-N-A','RI-NEG','KLR-FORA') THEN d.Qty ELSE -d.Qty END
-                              * ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma), rett_tot))
+    if k in ("rettneg", "rettpos"):
+        # Rettifiche scomposte per SEGNO (507), valorizzate allo STESSO costo della riga (WAPCost_ricalc).
+        # rettneg = consumi/uscite non-vendita (imballaggi/perdite): contributo + al consumo.
+        # rettpos = rientri/aumenti d'inventario: contributo − al consumo (valore negato).
+        # Ogni drill e' MONOSEGNO e somma ESATTAMENTE alla sua riga. CAR-AMA escluso (e' nel trasferimento FBA).
+        causali = "'KLRI-N-A','RI-NEG','KLR-FORA'" if k == "rettneg" else "'KLRI-P-A','RI-POS'"
+        seg = "" if k == "rettneg" else "-"
+        tot = fn(righe(f"""SELECT ISNULL({seg}SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),0) v
+            FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
+            LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
+            WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ({causali})
+              AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
+        rows = righe(f"""SELECT h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item, ROUND(SUM(d.Qty),0) AS qta,
+            ROUND({seg}SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
+            FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
+            LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
+            WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ({causali})
+              AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+            GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
+            ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma)
+        return jsonify(_con_resto(rows, tot))
+    if k == "resi":
         # RESI (509): contribuiscono col segno − al consumo (rientro merce) -> valore negato per sommare alla riga.
         resi_tot = fn(righe("SELECT -SUM(QtaResi*WAPCost_ricalc) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h", a=anno, d=mda, h=ma)[0]["v"])
         return jsonify(_con_resto(righe("""SELECT h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item,
