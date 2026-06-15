@@ -54,60 +54,76 @@ BEGIN
                          WHERE WAPMovementType = 2032533506 AND YEAR(PostingDate) = @Anno);
 
     ;WITH mov AS (
-        SELECT h.EntryId, CAST(h.PostingDate AS date) AS MovDate
+        SELECT h.EntryId, CAST(h.PostingDate AS date) AS MovDate, h.CustSupp, h.DocNo
         FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
         WHERE h.WAPMovementType = 2032533506 AND YEAR(h.PostingDate) = @Anno AND h.CustSupp <> '70209'
     ),
+    -- LEGAME DIRETTO (priorita' massima): movimento <-> ricevuta/fattura che condividono DocNo + Cliente
+    -- (vendite Amazon dal deposito Amazon: ogni ricevuta ha il movimento con lo STESSO DocNo). Niente ordine.
+    fatt_diretta AS (
+        SELECT mov.EntryId, sd.SaleDocId AS FatturaId, CAST(sd.DocumentDate AS date) AS FatturaDate,
+               sd.DocumentType AS FatturaType, 0 AS prio
+        FROM mov
+        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.DocNo = mov.DocNo AND sd.CustSupp = mov.CustSupp
+             AND sd.DocumentType IN (3407878,3407874,3407876) AND YEAR(sd.DocumentDate) = @Anno
+    ),
     -- GAMBA SEMPRE PRESENTE: movimento -> ordine cliente, in 2 modi (priorita': CrossRef, poi OrderId sul dettaglio).
-    -- Se piu' ordini, si tiene quello con data piu' vicina al movimento.
+    -- VALIDAZIONE: il CLIENTE dell'ordine deve combaciare col cliente del movimento (uccide i link spuri del grafo
+    -- verso ordini di altri clienti/anni). Se piu' ordini validi, si tiene quello con data piu' vicina al movimento.
     ordine AS (
-        SELECT EntryId, SaleOrdId, InternalOrdNo, OrderDate, OrderInvRsn FROM (
-            SELECT lk.EntryId, o.SaleOrdId, o.InternalOrdNo, CAST(o.OrderDate AS date) AS OrderDate, o.InvRsn AS OrderInvRsn,
+        SELECT EntryId, SaleOrdId, InternalOrdNo, OrderDate, OrderInvRsn, Customer FROM (
+            SELECT lk.EntryId, o.SaleOrdId, o.InternalOrdNo, CAST(o.OrderDate AS date) AS OrderDate, o.InvRsn AS OrderInvRsn, o.Customer,
                    ROW_NUMBER() OVER (PARTITION BY lk.EntryId
                                       ORDER BY lk.prio, ABS(DATEDIFF(day, lk.MovDate, o.OrderDate))) AS rn
             FROM (
-                SELECT mov.EntryId, mov.MovDate, xo.OriginDocID AS SaleOrdId, 1 AS prio
+                SELECT mov.EntryId, mov.MovDate, mov.CustSupp, xo.OriginDocID AS SaleOrdId, 1 AS prio
                 FROM mov JOIN KODICEBAGNO_4.dbo.MA_CrossReferences xo ON xo.DerivedDocID = mov.EntryId
                 UNION ALL
-                SELECT mov.EntryId, mov.MovDate, dd.OrderId, 2 AS prio
+                SELECT mov.EntryId, mov.MovDate, mov.CustSupp, dd.OrderId, 2 AS prio
                 FROM mov JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail dd ON dd.EntryId = mov.EntryId AND dd.OrderId <> 0
             ) lk
-            JOIN KODICEBAGNO_4.dbo.MA_SaleOrd o ON o.SaleOrdId = lk.SaleOrdId
+            JOIN KODICEBAGNO_4.dbo.MA_SaleOrd o ON o.SaleOrdId = lk.SaleOrdId AND o.Customer = lk.CustSupp
+            WHERE ABS(DATEDIFF(day, lk.MovDate, o.OrderDate)) <= 180
         ) q WHERE rn = 1
     ),
-    -- ORDINE -> FATTURA in 3 modi
+    -- ORDINE -> FATTURA in 3 modi. VALIDAZIONE: anche la FATTURA deve avere lo stesso cliente dell'ordine.
     cand AS (
+        SELECT EntryId, FatturaId, FatturaDate, FatturaType, prio FROM fatt_diretta   -- 0: Amazon FBA (DocNo+cliente, senza ordine)
+        UNION ALL
         SELECT ord.EntryId, sd.SaleDocId AS FatturaId, CAST(sd.DocumentDate AS date) AS FatturaDate,
                sd.DocumentType AS FatturaType, 1 AS prio  -- B2C
         FROM ordine ord
         JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON CAST(sd.SaleDocId AS varchar(21)) = ord.InternalOrdNo
-             AND sd.DocumentType IN (3407878,3407874,3407876)
-        UNION ALL
+             AND sd.DocumentType IN (3407878,3407874,3407876)        UNION ALL
         SELECT ord.EntryId, sd.SaleDocId, CAST(sd.DocumentDate AS date), sd.DocumentType, 2  -- AMAZON (1 salto)
         FROM ordine ord
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences xf ON xf.OriginDocID = ord.SaleOrdId
-        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = xf.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)
-        UNION ALL
+        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = xf.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)        UNION ALL
         SELECT ord.EntryId, sd.SaleDocId, CAST(sd.DocumentDate AS date), sd.DocumentType, 3  -- B2B via DDT (2 salti)
         FROM ordine ord
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x1 ON x1.OriginDocID = ord.SaleOrdId
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID = x1.DerivedDocID
-        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = x2.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)
-    ),
+        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = x2.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)    ),
+    -- scelta UNICA per movimento: priorita' (0 DocNo diretto, 1 B2C, 2 Amazon, 3 B2B), poi fattura piu' vicina
+    -- alla data del MOVIMENTO; tetto 180 gg (no link spuri). Riferimento data = movimento (vale anche senza ordine).
     best AS (
         SELECT c.EntryId, c.FatturaId, c.FatturaDate, c.FatturaType, c.prio,
                ROW_NUMBER() OVER (PARTITION BY c.EntryId
-                    ORDER BY c.prio, ABS(DATEDIFF(day, o.OrderDate, c.FatturaDate)), c.FatturaDate) AS rn
-        FROM cand c JOIN ordine o ON o.EntryId = c.EntryId
+                    ORDER BY c.prio, ABS(DATEDIFF(day, m.MovDate, c.FatturaDate)), c.FatturaDate) AS rn
+        FROM cand c JOIN mov m ON m.EntryId = c.EntryId
+        WHERE ABS(DATEDIFF(day, m.MovDate, c.FatturaDate)) <= 180
     )
     INSERT INTO kodice.vendite_link
         (MovEntryId, MovDate, SaleOrdId, InternalOrdNo, OrderDate, OrderInvRsn, FatturaId, FatturaDate, FatturaType, Modo)
     SELECT mov.EntryId, mov.MovDate, ord.SaleOrdId, ord.InternalOrdNo, ord.OrderDate, ord.OrderInvRsn,
            b.FatturaId, b.FatturaDate, b.FatturaType,
-           CASE WHEN ord.SaleOrdId IS NULL THEN 'NESSUN_ORDINE'
+           CASE WHEN b.prio = 0 THEN 'AMAZON_FBA'        -- DocNo+cliente diretto (Amazon, senza ordine)
+                WHEN b.prio = 1 THEN 'B2C'
+                WHEN b.prio = 2 THEN 'AMAZON'
+                WHEN b.prio = 3 THEN 'B2B_DDT'
                 WHEN ord.OrderInvRsn = 'KLSOSTA' THEN 'SOSTITUZIONE'   -- DDT solo, nessuna fattura per natura
-                WHEN b.FatturaId IS NULL THEN 'SOLO_ORDINE'
-                WHEN b.prio = 1 THEN 'B2C' WHEN b.prio = 2 THEN 'AMAZON' ELSE 'B2B_DDT' END
+                WHEN ord.SaleOrdId IS NOT NULL THEN 'SOLO_ORDINE'
+                ELSE 'NESSUN_ORDINE' END
     FROM mov
     LEFT JOIN ordine ord ON ord.EntryId = mov.EntryId
     LEFT JOIN best b ON b.EntryId = mov.EntryId AND b.rn = 1
