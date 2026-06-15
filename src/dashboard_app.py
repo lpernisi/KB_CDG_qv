@@ -735,7 +735,8 @@ _ACQ_CTE = """
                SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END) val
         FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
-        WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA'
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+        WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
           AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
         GROUP BY h.EntryId),
     m2b AS (SELECT DISTINCT c.EntryId, c.MovDate, x.OriginDocID AS BollaId
@@ -786,12 +787,17 @@ def api_riconciliazione_cogs():
     fattura, rettifiche, resi, ricevuto-non-fatturato, drift apertura). Identita' garantita per costruzione."""
     anno, mda, ma = _ric_periodo()
     fn = lambda v: float(v or 0)
-    cogs = fn(righe("SELECT SUM(ricavo_netto-mdc1) v FROM core.fatto_riga WHERE anno=:a AND mese BETWEEN :d AND :h",
+    # SOLO PRODOTTI: gli imballaggi (ItemType 997) entrano a magazzino ma in contabilita' sono costo, non merce.
+    # La riconciliazione del COGS si fa prodotti-contro-prodotti (vedi kodice.vw_classe_articolo).
+    cogs = fn(righe("""SELECT SUM(f.ricavo_netto-f.mdc1) v FROM core.fatto_riga f
+                    LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=f.codice_articolo
+                    WHERE f.anno=:a AND f.mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""",
                     a=anno, d=mda, h=ma)[0]["v"])
-    w = righe("""SELECT SUM(QtaVend*WAPCost_ricalc) vend, SUM(QtaResi*WAPCost_ricalc) resi,
-                        SUM(QtaRettTrasf*WAPCost_ricalc) rett, SUM(ValAcqPuro+ValAcqOneri) acq,
-                        SUM(QtaTrasfFBA*WAPCost_ricalc) trasf
-                 FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]
+    w = righe("""SELECT SUM(w.QtaVend*w.WAPCost_ricalc) vend, SUM(w.QtaResi*w.WAPCost_ricalc) resi,
+                        SUM(w.QtaRettTrasf*w.WAPCost_ricalc) rett, SUM(w.ValAcqPuro+w.ValAcqOneri) acq,
+                        SUM(w.QtaTrasfFBA*w.WAPCost_ricalc) trasf
+                 FROM kodice.wap_ricalc w LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item
+                 WHERE w.Anno=:a AND w.Mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, d=mda, h=ma)[0]
     vend = fn(w["vend"]); resi = fn(w["resi"]); rett = fn(w["rett"]); acq = fn(w["acq"]); trasf_fba = fn(w["trasf"])
     # Rettifiche scomposte in POSITIVE (rientri/aumenti) e NEGATIVE (consumi: imballaggi/perdite), dai 507 grezzi
     # valorizzati come la riga (WAPCost_ricalc). rett_p+rett_n riproducono il netto rett (P − N).
@@ -801,11 +807,17 @@ def api_riconciliazione_cogs():
         FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
         LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
         WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ('KLRI-P-A','RI-POS','KLRI-N-A','RI-NEG','KLR-FORA')
+          AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
           AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]
     rett_p = fn(pn["p"]); rett_n = fn(pn["n"])
-    rin_n = fn(righe("SELECT SUM(ValPuroIniz+ValOneriIniz) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:d", a=anno, d=mda)[0]["v"])
-    rfin_n = fn(righe("SELECT SUM(ValPuroFin+ValOneriFin) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese=:h", a=anno, h=ma)[0]["v"])
+    rin_n = fn(righe("""SELECT SUM(w.ValPuroIniz+w.ValOneriIniz) v FROM kodice.wap_ricalc w
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item
+        WHERE w.Anno=:a AND w.Mese=:d AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, d=mda)[0]["v"])
+    rfin_n = fn(righe("""SELECT SUM(w.ValPuroFin+w.ValOneriFin) v FROM kodice.wap_ricalc w
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item
+        WHERE w.Anno=:a AND w.Mese=:h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, h=ma)[0]["v"])
     gl_acq = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
         FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
         WHERE q.Componente='MATERIALE' AND q.Ruolo IN ('ACQUISTO','ONERE_ACQUISTO')
@@ -819,8 +831,20 @@ def api_riconciliazione_cogs():
           WHERE b.FiscalYear=:a AND (b.BalanceType=3145728 OR (b.BalanceType=3145730 AND b.BalanceMonth BETWEEN 1 AND :h))) fin
     """, a=anno, h=ma)[0]
     rin_b = fn(rb["ini"]); rfin_b = fn(rb["fin"])
-    # Scomposizione della "competenza acquisti" (gl_acq − acq) in voci parlanti (vedi _ric_acq):
-    acq_oneri = fn(righe("SELECT SUM(ValAcqOneri) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h", a=anno, d=mda, h=ma)[0]["v"])
+    # Rimanenze IMBALLAGGI dal NOSTRO ricalcolo (il bilancio non separa prodotti/imballaggi: il conto rimanenze e'
+    # unico). Le scorporo dal saldo contabile -> il confronto resta prodotti-contro-prodotti e la differenza di
+    # valutazione finisce TUTTA sui prodotti (come da indicazione). + carico imballaggi per il pannello separato.
+    imb = righe("""SELECT
+        ISNULL((SELECT SUM(w.ValPuroIniz+w.ValOneriIniz) FROM kodice.wap_ricalc w JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item AND ca.Classe='IMBALLAGGIO' WHERE w.Anno=:a AND w.Mese=:d),0) ini,
+        ISNULL((SELECT SUM(w.ValPuroFin+w.ValOneriFin) FROM kodice.wap_ricalc w JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item AND ca.Classe='IMBALLAGGIO' WHERE w.Anno=:a AND w.Mese=:h),0) fin,
+        ISNULL((SELECT SUM(w.ValAcqPuro+w.ValAcqOneri) FROM kodice.wap_ricalc w JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item AND ca.Classe='IMBALLAGGIO' WHERE w.Anno=:a AND w.Mese BETWEEN :d AND :h),0) carico
+        """, a=anno, d=mda, h=ma)[0]
+    imb_iniz = fn(imb["ini"]); imb_fin = fn(imb["fin"]); imb_carico = fn(imb["carico"])
+    rin_b = rin_b - imb_iniz; rfin_b = rfin_b - imb_fin       # rimanenze contabili SOLO PRODOTTI
+    # Scomposizione della "competenza acquisti" (gl_acq − acq) in voci parlanti (vedi _ric_acq), SOLO PRODOTTI:
+    acq_oneri = fn(righe("""SELECT SUM(w.ValAcqOneri) v FROM kodice.wap_ricalc w
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item
+        WHERE w.Anno=:a AND w.Mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, d=mda, h=ma)[0]["v"])
     gl_oneri = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
         FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
         WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO'
@@ -846,7 +870,8 @@ def api_riconciliazione_cogs():
         FROM kodice.vendite_link vl
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=vl.MovEntryId
         LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(vl.MovDate)
-        WHERE vl.MovDate>=:ini AND vl.MovDate<:fin1""", a=anno, ini=_ini, fin1=_fin1)[0]
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+        WHERE vl.MovDate>=:ini AND vl.MovDate<:fin1 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, ini=_ini, fin1=_fin1)[0]
     sped_ap = fn(vlb["apertura"]); sped_res = fn(vlb["residuo"]); sped_sost = fn(vlb["sost"])
     sped_val = (vend - cogs) - (sped_ap + sped_res + sped_sost)   # residuo: valutazione (WAP vs certif.) + chiusura
     r = lambda x: round(x, 2)
@@ -856,7 +881,7 @@ def api_riconciliazione_cogs():
         {"n": 2, "k": "uscita_ddt", "label": "+ Merce USCITA nel periodo ma NON in COGS (spedito su DDT/ordine, fattura prima o differita non ancora emessa)", "val": r(sped_ap + sped_res), "drill": True},
         {"n": 3, "k": "sost", "label": "+ Sostituzioni gratuite (DDT senza fattura: 0 ricavo, costo valorizzato = perdita → in COGS)", "val": r(sped_sost), "drill": True},
         {"n": 4, "k": "valsped", "label": "± Differenza di valutazione scarico (WAP-ricalc vs costo certificato) e residuo chiusura", "val": r(sped_val), "drill": False},
-        {"n": 5, "k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (imballaggi, inventari di fine mese)", "val": r(rett_n), "drill": True},
+        {"n": 5, "k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (perdite, inventari di fine mese)", "val": r(rett_n), "drill": True},
         {"n": 6, "k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
         {"n": 7, "k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
         {"n": 8, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
@@ -876,6 +901,8 @@ def api_riconciliazione_cogs():
                                   "var_rim": r(rin_b - rfin_b), "consumo": r(consumo_bil)},
                     "nostro": {"acquisti_carico": r(acq), "rim_iniz": r(rin_n), "rim_fin": r(rfin_n),
                                "var_rim": r(rin_n - rfin_n)},
+                    "imballaggi": {"rim_iniz": r(imb_iniz), "rim_fin": r(imb_fin), "carico": r(imb_carico),
+                                   "var_rim": r(imb_iniz - imb_fin)},
                     "ord_non_spediti": ord_ns})
 
 
@@ -900,18 +927,23 @@ def api_riconciliazione_drill():
         return sorted(rows, key=lambda x: (0 if x["valore"] < 0 else 1, -abs(x["valore"])))
 
     if k == "cogs":
-        tot = fn(righe("SELECT SUM(ricavo_netto-mdc1) v FROM core.fatto_riga WHERE anno=:a AND mese BETWEEN :d AND :h",
+        tot = fn(righe("""SELECT SUM(f.ricavo_netto-f.mdc1) v FROM core.fatto_riga f
+                       LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=f.codice_articolo
+                       WHERE f.anno=:a AND f.mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""",
                        a=anno, d=mda, h=ma)[0]["v"])
-        rows = righe("""SELECT TOP 300 codice_articolo AS Item, SUM(quantita) AS qta,
-            ROUND(SUM(ricavo_netto-mdc1),2) AS valore FROM core.fatto_riga
-            WHERE anno=:a AND mese BETWEEN :d AND :h
-            GROUP BY codice_articolo HAVING SUM(ricavo_netto-mdc1)<>0
-            ORDER BY ABS(SUM(ricavo_netto-mdc1)) DESC""", a=anno, d=mda, h=ma)
+        rows = righe("""SELECT TOP 300 f.codice_articolo AS Item, SUM(f.quantita) AS qta,
+            ROUND(SUM(f.ricavo_netto-f.mdc1),2) AS valore FROM core.fatto_riga f
+            LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=f.codice_articolo
+            WHERE f.anno=:a AND f.mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+            GROUP BY f.codice_articolo HAVING SUM(f.ricavo_netto-f.mdc1)<>0
+            ORDER BY ABS(SUM(f.ricavo_netto-f.mdc1)) DESC""", a=anno, d=mda, h=ma)
         return jsonify(_con_resto(rows, tot))
     if k == "fisico":
         # Costo del venduto FISICO = scarico vendite 506 per articolo, ESCLUSO il trasferimento FBA (cliente 70209),
         # valorizzato allo STESSO costo della riga (WAPCost_ricalc). Top 300 + residuo -> somma = riga esatta.
-        tot = fn(righe("SELECT SUM(QtaVend*WAPCost_ricalc) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h",
+        tot = fn(righe("""SELECT SUM(w.QtaVend*w.WAPCost_ricalc) v FROM kodice.wap_ricalc w
+                       LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item
+                       WHERE w.Anno=:a AND w.Mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""",
                        a=anno, d=mda, h=ma)[0]["v"])
         rows = righe("""
             SELECT TOP 300 LTRIM(RTRIM(d.Item)) AS Item, ROUND(SUM(d.Qty),0) AS qta_spedita,
@@ -919,7 +951,9 @@ def api_riconciliazione_drill():
             FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
-            WHERE h.WAPMovementType=2032533506 AND h.CustSupp<>'70209' AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+            LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+            WHERE h.WAPMovementType=2032533506 AND h.CustSupp<>'70209' AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+              AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
             GROUP BY LTRIM(RTRIM(d.Item)) HAVING ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)))>0.5
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma)
         return jsonify(_con_resto(rows, tot))
@@ -932,10 +966,14 @@ def api_riconciliazione_drill():
                 FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
                 JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
                 LEFT JOIN kodice.costi_articolo_mese cm ON cm.Item=LTRIM(RTRIM(d.Item)) AND cm.Anno=:a AND cm.Mese=MONTH(h.PostingDate)
-                WHERE h.WAPMovementType=2032533506 AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+                LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+                WHERE h.WAPMovementType=2032533506 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+                  AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
                 GROUP BY LTRIM(RTRIM(d.Item))),
-            fr AS (SELECT codice_articolo AS cod, SUM(quantita) AS q FROM core.fatto_riga
-                   WHERE anno=:a AND mese BETWEEN :d AND :h GROUP BY codice_articolo),
+            fr AS (SELECT f.codice_articolo AS cod, SUM(f.quantita) AS q FROM core.fatto_riga f
+                   LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=f.codice_articolo
+                   WHERE f.anno=:a AND f.mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
+                   GROUP BY f.codice_articolo),
             own AS (SELECT cod AS Item, q FROM fr),
             kitimp AS (SELECT dd.Component AS Item, SUM(dd.Qty*fr.q) AS q FROM kodice.vw_distinta dd JOIN fr ON fr.cod=dd.BOM GROUP BY dd.Component)
             SELECT TOP 300 s.Item, ROUND(s.qty,0) AS spedito_qta,
@@ -952,7 +990,9 @@ def api_riconciliazione_drill():
         # (riga = −trasf_fba): valore = −Σ[(carico − uscita) × WAPCost]. Nessun filtro sulle qty (una gamba
         # puo' cadere in un mese diverso → qty pari ma valore ≠0): si tengono tutti gli item con valore ≠ 0,
         # cosi' il dettaglio somma ESATTAMENTE alla riga. Ordinato per segno (− poi +).
-        fba_tot = fn(righe("SELECT -SUM(QtaTrasfFBA*WAPCost_ricalc) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h", a=anno, d=mda, h=ma)[0]["v"])
+        fba_tot = fn(righe("""SELECT -SUM(w.QtaTrasfFBA*w.WAPCost_ricalc) v FROM kodice.wap_ricalc w
+            LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item
+            WHERE w.Anno=:a AND w.Mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, d=mda, h=ma)[0]["v"])
         return jsonify(_con_resto(righe("""
             SELECT Item, ROUND(uscita_atri,0) AS uscita_atri, ROUND(carico_amazon,0) AS carico_amazon,
                    ROUND(carico_amazon-uscita_atri,0) AS differenza_qta, ROUND(valore,2) AS valore
@@ -963,7 +1003,8 @@ def api_riconciliazione_drill():
                        -SUM(CASE WHEN v.Gamba='CARICO_AMAZON' THEN v.Qta ELSE -v.Qta END * ISNULL(wr.WAPCost_ricalc,0)) AS valore
                 FROM kodice.vw_fba_movimenti v
                 LEFT JOIN kodice.wap_ricalc wr ON wr.Item=v.Item AND wr.Anno=v.Anno AND wr.Mese=v.Mese
-                WHERE v.Anno=:a AND v.Mese BETWEEN :d AND :h
+                LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=v.Item
+                WHERE v.Anno=:a AND v.Mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
                 GROUP BY v.Item
             ) t
             WHERE ABS(valore) >= 0.005
@@ -979,27 +1020,32 @@ def api_riconciliazione_drill():
             FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
-            WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ({causali})
+            LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+            WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ({causali}) AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
               AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
         rows = righe(f"""SELECT h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item, ROUND(SUM(d.Qty),0) AS qta,
             ROUND({seg}SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
             FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
-            WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ({causali})
+            LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+            WHERE h.WAPMovementType=2032533507 AND h.InvRsn IN ({causali}) AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
               AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
             GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma)
         return jsonify(_con_resto(rows, tot))
     if k == "resi":
         # RESI (509): contribuiscono col segno − al consumo (rientro merce) -> valore negato per sommare alla riga.
-        resi_tot = fn(righe("SELECT -SUM(QtaResi*WAPCost_ricalc) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h", a=anno, d=mda, h=ma)[0]["v"])
+        resi_tot = fn(righe("""SELECT -SUM(w.QtaResi*w.WAPCost_ricalc) v FROM kodice.wap_ricalc w
+            LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item
+            WHERE w.Anno=:a AND w.Mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, d=mda, h=ma)[0]["v"])
         return jsonify(_con_resto(righe("""SELECT h.InvRsn AS causale, LTRIM(RTRIM(d.Item)) AS Item,
             ROUND(SUM(d.Qty),0) AS qta, ROUND(-SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
             FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=d.EntryId
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(h.PostingDate)
-            WHERE h.WAPMovementType=2032533509
+            LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+            WHERE h.WAPMovementType=2032533509 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
               AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
             GROUP BY h.InvRsn, LTRIM(RTRIM(d.Item))
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, d=mda, h=ma), resi_tot))
@@ -1082,7 +1128,8 @@ def api_riconciliazione_drill():
                 FROM kodice.vendite_link vl
                 JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId = vl.MovEntryId
                 LEFT JOIN kodice.wap_ricalc wr ON wr.Item = LTRIM(RTRIM(d.Item)) AND wr.Anno = :a AND wr.Mese = MONTH(vl.MovDate)
-                WHERE vl.MovDate >= :ini AND vl.MovDate < :fin1
+                LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item = LTRIM(RTRIM(d.Item))
+                WHERE vl.MovDate >= :ini AND vl.MovDate < :fin1 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
                   AND ((vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini)
                        OR vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE'))
             ) z GROUP BY spiegazione ORDER BY SUM(val) DESC""", a=anno, ini=ini, fin1=fin1))
@@ -1097,7 +1144,8 @@ def api_riconciliazione_drill():
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId = vl.MovEntryId
             LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = h.CustSupp
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item = LTRIM(RTRIM(d.Item)) AND wr.Anno = :a AND wr.Mese = MONTH(vl.MovDate)
-            WHERE vl.Modo = 'SOSTITUZIONE' AND vl.MovDate >= :ini AND vl.MovDate < :fin1
+            LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item = LTRIM(RTRIM(d.Item))
+            WHERE vl.Modo = 'SOSTITUZIONE' AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO' AND vl.MovDate >= :ini AND vl.MovDate < :fin1
             GROUP BY ISNULL(cs.CompanyName, h.CustSupp)
             HAVING ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) > 0.005
             ORDER BY SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)) DESC""", a=anno, ini=ini, fin1=fin1))
@@ -1650,15 +1698,25 @@ async function caricaRiconc(){
         <tr class="det" id="ricdet_${x.k}" style="display:none"><td colspan="2"><div class="dbox" id="ricbox_${x.k}"></div></td></tr>`;
   });
   h+=`</tbody></table></div>`;
-  h+=`<div class="panel"><h2>Dati contabili (raffronto)</h2><table><tbody>
+  const imb=d.imballaggi||{};
+  h+=`<div class="panel"><h2>Dati contabili (raffronto) — solo PRODOTTI</h2><table><tbody>
       <tr><td>Acquisti (GL 06011000 + oneri)</td><td class="num">${eur(co.acquisti)}</td></tr>
-      <tr><td>+ Rimanenze iniziali (bilancio)</td><td class="num">${eur(co.rim_iniz)}</td></tr>
-      <tr><td>− Rimanenze finali (bilancio)</td><td class="num">${eur(co.rim_fin)}</td></tr>
+      <tr><td>+ Rimanenze iniziali (bilancio − imballaggi)</td><td class="num">${eur(co.rim_iniz)}</td></tr>
+      <tr><td>− Rimanenze finali (bilancio − imballaggi)</td><td class="num">${eur(co.rim_fin)}</td></tr>
       <tr style="font-weight:700;border-top:2px solid var(--line)"><td>= Consumo materie (bilancio)</td><td class="num">${eur(co.consumo)}</td></tr>
       </tbody></table>
-      <p class="muted" style="margin-top:12px;font-size:12px">Rimanenze <strong>nostre</strong> (ricalcolo): iniz ${eur(no.rim_iniz)} · fin ${eur(no.rim_fin)}<br>Carico merce nostro: ${eur(no.acquisti_carico)}</p>
-      <div class="banner ok" style="margin-top:10px;font-size:12.5px">Il ponte a sinistra parte dal nostro COGS e arriva a questo consumo contabile: ogni scarto è una <strong>riga spiegata</strong> (sfasamento spedizione/fattura, rettifiche, resi, drift apertura). Validazione implicita del costo del venduto.</div>
+      <p class="muted" style="margin-top:12px;font-size:12px">Rimanenze <strong>nostre</strong> prodotti (ricalcolo): iniz ${eur(no.rim_iniz)} · fin ${eur(no.rim_fin)}<br>Carico merce prodotti nostro: ${eur(no.acquisti_carico)}</p>
+      <div class="banner ok" style="margin-top:10px;font-size:12.5px">Ponte <strong>prodotti-contro-prodotti</strong>: gli imballaggi (ItemType 997) sono esclusi da carico, rimanenze e COGS. Ogni scarto è una <strong>riga spiegata</strong>; validazione implicita del costo del venduto.</div>
       </div></div>`;
+  h+=`<div class="panel" style="margin-top:14px">
+      <h2>Imballaggi — traccia separata (esclusi dal COGS prodotti)</h2>
+      <p class="muted">Gli imballaggi entrano a magazzino col carico ma in contabilità sono <strong>costo</strong> (conto 06021505), non merce. Tenuti fuori dalla riconciliazione del costo del venduto. Valori dal nostro ricalcolo (il bilancio non separa il conto rimanenze).</p>
+      <table><tbody>
+      <tr><td>Rimanenze iniziali imballaggi</td><td class="num">${eur(imb.rim_iniz)}</td></tr>
+      <tr><td>Rimanenze finali imballaggi</td><td class="num">${eur(imb.rim_fin)}</td></tr>
+      <tr><td>Carico imballaggi nel periodo</td><td class="num">${eur(imb.carico)}</td></tr>
+      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>Consumo imballaggi (Δrim + carico)</td><td class="num">${eur((imb.rim_iniz||0)-(imb.rim_fin||0)+(imb.carico||0))}</td></tr>
+      </tbody></table></div>`;
   h+=`<div class="panel" style="margin-top:14px">
       <h2>Ordini fatturati non ancora spediti alla chiusura</h2>
       <p class="muted">Competenza al periodo (mesi 1–${m}/${a}): <strong>${(d.ord_non_spediti||0).toLocaleString('it-IT')}</strong> ordini con <strong>fattura</strong> emessa (COGS registrato) ma merce non ancora uscita dal magazzino al ${m}/${a}. Per competenza include anche gli ordini spediti <em>dopo</em> la chiusura; esclude gli ordini non ancora fatturati (tipicamente B2B aperti). Fonte: <code>VwKLStatoOrdini</code> (<code>CompletamenteConsegnato='No'</code> + spediti post-chiusura). <a href="#" onclick="ricDrill('ordnonsped');return false">▸ elenco documenti</a></p>
