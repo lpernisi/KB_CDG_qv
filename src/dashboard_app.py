@@ -655,7 +655,7 @@ def api_quadratura_materiale():
                ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS importo
         FROM kodice.conti_quadratura q
         JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account = q.Account
-        WHERE q.Componente='MATERIALE' AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :mda AND :ma
+        WHERE q.Componente='MATERIALE' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :mda AND :ma
         GROUP BY q.Account, q.Ruolo, q.Nota ORDER BY q.Account""", a=anno, mda=mda, ma=ma)
     # Rimanenze NOSTRE (valorizzazione wap_ricalc) a inizio e fine periodo
     rim = righe("""
@@ -743,13 +743,23 @@ _ACQ_CTE = """
     m2b AS (SELECT DISTINCT c.EntryId, c.MovDate, x.OriginDocID AS BollaId
             FROM carico c JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x ON x.DerivedDocID=c.EntryId
             JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc b ON b.PurchaseDocId=x.OriginDocID AND b.DocumentType=9830400),
-    -- fattura collegata entro +/- 1 anno dal carico (oltre = aggancio spurio del grafo CrossReferences, scartato)
-    -- SOLO la derivazione vera bolla->fattura d'acquisto (CrossRef DerivedDocType 27066402): la bolla puo'
-    -- avere anche link SPURI ad altre fatture (tipo 27066389, anche di anni fa) che falsavano l'aggancio.
-    b2f AS (SELECT DISTINCT m.EntryId, m.MovDate, CAST(f.DocumentDate AS date) FattDate
+    -- DATA DI COMPETENZA della fattura = AccrualDate della registrazione contabile (NON la data del PurchaseDoc:
+    -- es. Bertoli prot. 000801 ha DocumentDate giugno ma AccrualDate maggio -> DENTRO il periodo). L'header
+    -- MA_JournalEntries non e' interrogabile per CRRefID (tabella enorme non indicizzata -> timeout): prendo
+    -- l'AccrualDate partendo dal GLDetail filtrato per CONTO MERCE (veloce) e risalgo all'header per JournalEntryId (PK).
+    fattacc AS (
+        SELECT je.CRRefID AS FattId, MIN(CAST(g.AccrualDate AS date)) AS Accrual
+        FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+        JOIN kodice.conti_quadratura q ON q.Account=g.Account AND q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO'
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId AND je.CRRefType=27066402
+        WHERE g.AccrualDate >= DATEFROMPARTS(:a - 1, 1, 1)
+        GROUP BY je.CRRefID),
+    -- bolla->fattura SOLO via derivazione vera (CrossRef DerivedDocType 27066402); periodo per AccrualDate.
+    b2f AS (SELECT DISTINCT m.EntryId, m.MovDate, fa.Accrual AS FattDate
             FROM m2b m JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID=m.BollaId AND x2.DerivedDocType=27066402
             JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc f ON f.PurchaseDocId=x2.DerivedDocID AND f.DocumentType=9830401
-            WHERE ABS(DATEDIFF(day, m.MovDate, f.DocumentDate)) <= 365),
+            JOIN fattacc fa ON fa.FattId=f.PurchaseDocId
+            WHERE ABS(DATEDIFF(day, m.MovDate, fa.Accrual)) <= 365),
     -- fattura collegata = la PIU' ANTICA entro l'anno (la fattura d'origine della merce, non una coincidenza in-periodo)
     fr AS (SELECT EntryId, FattDate, ROW_NUMBER() OVER (PARTITION BY EntryId ORDER BY FattDate) rn FROM b2f),
     cf AS (SELECT c.EntryId, c.val, fr.FattDate FROM carico c LEFT JOIN fr ON fr.EntryId=c.EntryId AND fr.rn=1)
@@ -760,7 +770,7 @@ _ACQ_CTE = """
 # Solo conti MERCE (Ruolo='ACQUISTO': 06011000/02): qui "nessun MA_PurchaseDoc dietro" = davvero giroconto manuale.
 # Gli oneri (trasporti/dazi) sono spesso registrati con doc NON-acquisto -> li lasciamo a oneri/valutazione residua.
 _GL_NODOC_WHERE = """q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO'
-          AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h AND pd.PurchaseDocId IS NULL"""
+          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h AND pd.PurchaseDocId IS NULL"""
 
 
 def _ric_acq(anno, mda, ma):
@@ -824,7 +834,7 @@ def api_riconciliazione_cogs():
     gl_acq = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
         FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
         WHERE q.Componente='MATERIALE' AND q.Ruolo IN ('ACQUISTO','ONERE_ACQUISTO')
-          AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
+          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
     rb = righe("""SELECT
         (SELECT ISNULL(SUM(b.Debit-b.Credit),0) FROM KODICEBAGNO_4.dbo.MA_ChartOfAccountsBalances b
            JOIN kodice.conti_quadratura q ON q.Account=b.Account AND q.Componente='MATERIALE' AND q.Ruolo='RIMANENZE'
@@ -851,7 +861,7 @@ def api_riconciliazione_cogs():
     gl_oneri = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
         FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
         WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO'
-          AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
+          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
     ab = _ric_acq(anno, mda, ma)
     ricnf_tot = gl_acq - acq                                   # totale competenza acquisti = −(acq − gl_acq)
     oneri_contrib = gl_oneri - acq_oneri                       # oneri: registrati in GL − nostro carico
@@ -1103,7 +1113,7 @@ def api_riconciliazione_drill():
         oneri = gg("SELECT SUM(ValAcqOneri) v FROM kodice.wap_ricalc WHERE Anno=:a AND Mese BETWEEN :d AND :h")
         glo = gg("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
             FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
-            WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO' AND YEAR(g.PostingDate)=:a AND MONTH(g.PostingDate) BETWEEN :d AND :h""")
+            WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h""")
         ev = lambda x: ("%.0f" % x).replace(",", ".")
         return jsonify([
             {"voce": "Oneri accessori registrati in contabilità (dazi/trasporti import, conti 06013/14/15): " + ev(glo) + " €", "valore": round(glo, 2)},
