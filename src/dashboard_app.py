@@ -853,8 +853,6 @@ def api_riconciliazione_cogs():
     ab = _ric_acq(anno, mda, ma)
     ricnf_tot = gl_acq - acq                                   # totale competenza acquisti = −(acq − gl_acq)
     oneri_contrib = gl_oneri - acq_oneri                       # oneri: registrati in GL − nostro carico
-    # residuo di VALUTAZIONE (carico vs fattura merce sui documenti del periodo, incl. cambio): bilancia per costruzione
-    acq_val_resid = ricnf_tot - (-ab["prec"] - ab["dopo"] - ab["nofatt"] + ab["glnodoc"] + oneri_contrib)
     consumo_fisico = rin_n + acq - rfin_n
     consumo_bil = gl_acq + rin_b - rfin_b
     # Scomposizione dello sfasamento spedizione/fattura dal LINK materializzato (kodice.vendite_link):
@@ -874,28 +872,33 @@ def api_riconciliazione_cogs():
         LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
         WHERE vl.MovDate>=:ini AND vl.MovDate<:fin1 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, ini=_ini, fin1=_fin1)[0]
     sped_ap = fn(vlb["apertura"]); sped_res = fn(vlb["residuo"]); sped_sost = fn(vlb["sost"])
-    sped_val = (vend - cogs) - (sped_ap + sped_res + sped_sost)   # residuo: valutazione (WAP vs certif.) + chiusura
     r = lambda x: round(x, 2)
-    # Ponte nella struttura richiesta: da COGS (X) a Consumo materie contabile (Y), per categorie. Somma = Y (identita').
-    righe_out = [
-        {"n": 1, "k": "cogs", "label": "Costo del venduto CDG — X (abbinato al fatturato)", "val": r(cogs), "tot": True, "drill": True},
-        {"n": 2, "k": "uscita_ddt", "label": "+ Merce USCITA nel periodo ma NON in COGS (spedito su DDT/ordine, fattura prima o differita non ancora emessa)", "val": r(sped_ap + sped_res), "drill": True},
-        {"n": 3, "k": "sost", "label": "+ Sostituzioni gratuite (DDT senza fattura: 0 ricavo, costo valorizzato = perdita → in COGS)", "val": r(sped_sost), "drill": True},
-        {"n": 4, "k": "valsped", "label": "± Differenza di valutazione scarico (WAP-ricalc vs costo certificato) e residuo chiusura", "val": r(sped_val), "drill": False},
-        {"n": 5, "k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (perdite, inventari di fine mese)", "val": r(rett_n), "drill": True},
-        {"n": 6, "k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
-        {"n": 7, "k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
-        {"n": 8, "k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
-        {"n": 9, "k": "ricnf_prec", "label": "− Fatturato in periodo precedente (fattura già registrata prima, merce ricevuta nel periodo)", "val": r(-ab["prec"]), "drill": True},
-        {"n": 10, "k": "ricnf_dopo", "label": "− Ricevuto non fatturato: merce a magazzino, fattura emessa DOPO il periodo", "val": r(-ab["dopo"]), "drill": True},
-        {"n": 11, "k": "ricnf_nofatt", "label": "− Ricevuto non fatturato: merce a magazzino, nessuna fattura collegata", "val": r(-ab["nofatt"]), "drill": True},
-        {"n": 12, "k": "glnodoc", "label": "± Registrazioni a conto materiale SENZA documento (giroconti contabili: es. \"merci in transito\")", "val": r(ab["glnodoc"]), "drill": True},
-        {"n": 13, "k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (registrati in contabilità − nostro carico: dazi, trasporti import)", "val": r(oneri_contrib), "drill": True},
-        {"n": 14, "k": "ricnf_val", "label": "± Differenza di valutazione carico vs fattura merce (documenti del periodo, incl. cambio)", "val": r(acq_val_resid), "drill": False},
-        {"n": 15, "k": "rim_iniz", "label": "+ Differenza valutazione rimanenze INIZIALI (contabili − nostre)", "val": r(rin_b - rin_n), "drill": False},
-        {"n": 16, "k": "rim_fin", "label": "+ Differenza valutazione rimanenze FINALI (nostre − contabili)", "val": r(rfin_n - rfin_b), "drill": False},
-        {"n": 17, "k": "bilancio", "label": "= Consumo materie a CONTABILITÀ — Y (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True},
+    # NESSUN PLUG: ogni componente e' MISURATA da fonte. Il ponte NON e' forzato a zero: cio' che le componenti
+    # misurate non spiegano resta una riga esplicita "DIFFERENZA NON GIUSTIFICATA" (= Y − X − Σcomponenti), che
+    # PUO' essere diversa da zero. Tipicamente e' la differenza di valorizzazione (nostro ricalcolo vs costo
+    # certificato vs contabilita') ancora da dettagliare per articolo.
+    comp = [
+        {"k": "uscita_ddt", "label": "+ Merce USCITA nel periodo ma NON in COGS (spedito su DDT/ordine, fattura prima o differita non ancora emessa)", "val": r(sped_ap + sped_res), "drill": True},
+        {"k": "sost", "label": "+ Sostituzioni gratuite (DDT senza fattura: 0 ricavo, costo valorizzato = perdita)", "val": r(sped_sost), "drill": True},
+        {"k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (perdite, inventari di fine mese)", "val": r(rett_n), "drill": True},
+        {"k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
+        {"k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
+        {"k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
+        {"k": "ricnf_prec", "label": "− Fatturato in periodo precedente (fattura già registrata prima, merce ricevuta nel periodo)", "val": r(-ab["prec"]), "drill": True},
+        {"k": "ricnf_dopo", "label": "− Ricevuto non fatturato: merce a magazzino, fattura emessa DOPO il periodo", "val": r(-ab["dopo"]), "drill": True},
+        {"k": "ricnf_nofatt", "label": "− Ricevuto non fatturato: merce a magazzino, nessuna fattura collegata", "val": r(-ab["nofatt"]), "drill": True},
+        {"k": "glnodoc", "label": "± Registrazioni a conto materiale SENZA documento (giroconti contabili: es. \"merci in transito\")", "val": r(ab["glnodoc"]), "drill": True},
+        {"k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (registrati in contabilità − nostro carico: dazi, trasporti import)", "val": r(oneri_contrib), "drill": True},
+        {"k": "rim_iniz", "label": "+ Differenza valutazione rimanenze INIZIALI (contabili − nostre)", "val": r(rin_b - rin_n), "drill": False},
+        {"k": "rim_fin", "label": "+ Differenza valutazione rimanenze FINALI (nostre − contabili)", "val": r(rfin_n - rfin_b), "drill": False},
     ]
+    spiegato = cogs + sum(c["val"] for c in comp)
+    non_giust = consumo_bil - spiegato                     # NON forzato a zero: e' il vero scarto non spiegato
+    righe_out = ([{"n": 1, "k": "cogs", "label": "Costo del venduto CDG — X (abbinato al fatturato)", "val": r(cogs), "tot": True, "drill": True}]
+                 + [dict(c, n=i + 2) for i, c in enumerate(comp)]
+                 + [{"n": len(comp) + 2, "k": "spiegato", "label": "= Totale spiegato (X + componenti misurate)", "val": r(spiegato), "tot": True},
+                    {"n": len(comp) + 3, "k": "non_giust", "label": "≠ DIFFERENZA NON GIUSTIFICATA (Y − spiegato) — scarto reale, da dettagliare", "val": r(non_giust), "drill": False},
+                    {"n": len(comp) + 4, "k": "bilancio", "label": "= Consumo materie a CONTABILITÀ — Y (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True}])
     ord_ns = righe("SELECT COUNT(*) n " + _ORD_NON_SPEDITI_FROM, fine=_fine_periodo(anno, ma))[0]["n"]
     return jsonify({"anno": anno, "mese_da": mda, "mese_a": ma, "righe": righe_out,
                     "contabile": {"acquisti": r(gl_acq), "rim_iniz": r(rin_b), "rim_fin": r(rfin_b),
