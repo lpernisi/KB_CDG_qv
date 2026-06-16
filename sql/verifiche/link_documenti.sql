@@ -242,3 +242,69 @@ BEGIN
     OPTION (MAXDOP 1);
 END
 GO
+
+-- =============================================================================
+-- kodice.raccordo_proposto — RICERCA CONTRARIA: spedizioni senza fattura (Insieme A) ri-agganciate
+-- a fatture ORFANE senza aggancio a movimento (Insieme B), per cliente + articolo in comune +
+-- |data spedizione - data fattura| <= 90 gg. Finestra fatture = anno +/- 90 gg.
+-- Serve per le fatture fatte MANUALMENTE senza riferimento all'ordine (il link in avanti non le trova).
+-- Stato: PROPOSTO (default) -> CONFERMATO / RIFIUTATO da frontend. NumCandidati>1 = scelta multipla.
+-- =============================================================================
+IF OBJECT_ID('kodice.raccordo_proposto', 'U') IS NOT NULL DROP TABLE kodice.raccordo_proposto;
+GO
+CREATE TABLE kodice.raccordo_proposto (
+    Anno          smallint NOT NULL,
+    MovEntryId    int      NOT NULL,
+    FatturaId     int      NOT NULL,
+    CustSupp      varchar(20) NULL,
+    MovDate       date     NULL,
+    FatturaDate   date     NULL,
+    GgDiff        int      NULL,
+    ArtComuni     int      NULL,        -- nr articoli in comune (forza del match)
+    NumCandidati  int      NULL,        -- quante fatture candidate ha questa spedizione
+    Stato         varchar(12) NOT NULL CONSTRAINT DF_racc_stato DEFAULT 'PROPOSTO',
+    CONSTRAINT PK_raccordo_proposto PRIMARY KEY (MovEntryId, FatturaId)
+);
+GO
+CREATE OR ALTER PROCEDURE kodice.usp_build_raccordo_proposto
+    @Anno smallint
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DELETE FROM kodice.raccordo_proposto WHERE Anno = @Anno;
+
+    DECLARE @binf date = DATEADD(day, -90, DATEFROMPARTS(@Anno,1,1));
+    DECLARE @bsup date = DATEADD(day,  91, DATEFROMPARTS(@Anno,12,31));
+
+    ;WITH A AS (   -- spedizioni dell'anno SENZA fattura agganciata (prodotti, no sostituzioni 1300*)
+        SELECT vl.MovEntryId, h.CustSupp, vl.MovDate
+        FROM kodice.vendite_link vl
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = vl.MovEntryId
+        WHERE vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE') AND vl.InternalOrdNo NOT LIKE '1300%'
+          AND YEAR(vl.MovDate) = @Anno),
+    B AS (         -- fatture ORFANE (nessun movimento le aggancia) nella finestra anno +/- 90 gg
+        SELECT sd.SaleDocId, sd.CustSupp, sd.DocumentDate
+        FROM KODICEBAGNO_4.dbo.MA_SaleDoc sd
+        LEFT JOIN (SELECT DISTINCT FatturaId FROM kodice.vendite_link WHERE FatturaId IS NOT NULL) v
+               ON v.FatturaId = sd.SaleDocId
+        WHERE sd.DocumentType IN ('3407874','3407878','3407876') AND v.FatturaId IS NULL
+          AND sd.DocumentDate >= @binf AND sd.DocumentDate < @bsup
+          AND sd.CustSupp NOT IN ('KODICEFR','KODICEDE','KODICEES')),
+    mtc AS (       -- coppie candidate: stesso cliente, |data|<=90, >=1 articolo in comune
+        SELECT a.MovEntryId, a.CustSupp, a.MovDate, b.SaleDocId, b.DocumentDate,
+               ABS(DATEDIFF(day, a.MovDate, b.DocumentDate)) AS GgDiff,
+               COUNT(DISTINCT LTRIM(RTRIM(ad.Item))) AS ArtComuni
+        FROM A a
+        JOIN B b ON b.CustSupp = a.CustSupp AND ABS(DATEDIFF(day, a.MovDate, b.DocumentDate)) <= 90
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail ad ON ad.EntryId = a.MovEntryId
+        JOIN KODICEBAGNO_4.dbo.MA_SaleDocDetail bd ON bd.SaleDocId = b.SaleDocId
+             AND LTRIM(RTRIM(bd.Item)) = LTRIM(RTRIM(ad.Item))
+        GROUP BY a.MovEntryId, a.CustSupp, a.MovDate, b.SaleDocId, b.DocumentDate,
+                 ABS(DATEDIFF(day, a.MovDate, b.DocumentDate)))
+    INSERT INTO kodice.raccordo_proposto (Anno, MovEntryId, FatturaId, CustSupp, MovDate, FatturaDate, GgDiff, ArtComuni, NumCandidati)
+    SELECT @Anno, m.MovEntryId, m.SaleDocId, m.CustSupp, m.MovDate, m.DocumentDate, m.GgDiff, m.ArtComuni,
+           COUNT(*) OVER (PARTITION BY m.MovEntryId)
+    FROM mtc m
+    OPTION (MAXDOP 1);
+END
+GO
