@@ -3,6 +3,25 @@
 > Letto automaticamente da Claude Code. È la "memoria" condivisa del progetto:
 > tienilo aggiornato, perché è ciò che mi (ci) tiene allineati al disegno reale.
 
+## ⚠️⚠️ PRINCIPIO N.1 — IL DESTINATARIO È UN CONTROLLER / CEO, NON UN TECNICO ⚠️⚠️
+
+> **OGNI numero, riga, etichetta e drill che esponiamo deve essere comprensibile e
+> mostrabile DA SOLO a un CONTROLLER o al CEO — SENZA che un tecnico spieghi cosa fa
+> la query o quale tabella è joinata con quale.** Questo è il FINE ULTIMO di tutto.
+>
+> Regole non negoziabili sull'OUTPUT (cruscotto, righe di riconciliazione, drill):
+> - **Lingua da bilancio/controllo di gestione**, in italiano. MAI nomi di tabelle/colonne/
+>   conti grezzi o sigle interne (`CRRefType`, `WAPMovementType`, `06021505`, `ATRI`, `505/506`,
+>   "join", "CTE"). Quelli vivono SOLO nel codice e nei commenti.
+> - **Ogni differenza ha una CAUSA scritta in parole** ("righe senza codice articolo",
+>   "messa a costo diretto in prima nota", "merce spedita ma fatturata prima"), non un
+>   residuo numerico da interpretare.
+> - **I totali tornano** e ogni riga è **drill-abile fino al DOCUMENTO** (numero/protocollo,
+>   fornitore/cliente, data, importo) — niente numeri "per differenza" o tappabuchi.
+> - **Mai un dump**: tabelle ordinate e raggruppate in modo che la lettura racconti una storia.
+> - **Test**: se una riga non si capisce senza spiegazione tecnica, è SBAGLIATA → va riscritta.
+>   Prima di esporre qualcosa, chiediti: "lo capirebbe il CEO da solo?".
+
 ## Obiettivo
 
 Costruire **CDG_QV**, un datawarehouse semplice su SQL Server in cui far atterrare

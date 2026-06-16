@@ -914,29 +914,29 @@ def api_riconciliazione_cogs():
     # poi quelle ancora da verificare, infine quelle inaffidabili da link/da dettagliare).
     comp = [
         # -- alta certezza: validate e comprese --
-        {"k": "rim_iniz", "label": "+ Differenza valutazione rimanenze INIZIALI (contabili − nostre)", "val": r(rin_b - rin_n), "drill": False},
-        {"k": "rim_fin", "label": "+ Differenza valutazione rimanenze FINALI (nostre − contabili)", "val": r(rfin_n - rfin_b), "drill": False},
-        {"k": "resi", "label": "− Resi da clienti (rientro merce, non in contabilità costi)", "val": r(-resi), "drill": True},
-        {"k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (perdite, inventari di fine mese)", "val": r(rett_n), "drill": True},
-        {"k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
-        {"k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
-        {"k": "sost_sped", "label": "± Sostituzioni in spedizione (articolo scaricato ≠ fatturato, kit esplosi)", "val": r(sost_delta), "drill": True},
-        {"k": "ricnf_nofatt", "label": "+ Ricevuto NON fatturato: bolle fornitore ancora da fatturare (nessuna fattura)", "val": r(-ab["nofatt"]), "drill": True},
+        {"k": "rim_iniz", "label": "+ Differenza di valore delle rimanenze a INIZIO periodo (contabilità − magazzino)", "val": r(rin_b - rin_n), "drill": False},
+        {"k": "rim_fin", "label": "+ Differenza di valore delle rimanenze a FINE periodo (magazzino − contabilità)", "val": r(rfin_n - rfin_b), "drill": False},
+        {"k": "resi", "label": "− Resi da clienti (merce rientrata, in contabilità non è un costo)", "val": r(-resi), "drill": True},
+        {"k": "rettneg", "label": "+ Cali, perdite e rettifiche d'inventario (consumi non da vendita)", "val": r(rett_n), "drill": True},
+        {"k": "rettpos", "label": "− Rettifiche positive d'inventario (rientri / aumenti)", "val": r(-rett_p), "drill": True},
+        {"k": "fba", "label": "± Merce trasferita al magazzino Amazon (FBA): invii non ancora bilanciati", "val": r(-trasf_fba), "drill": True},
+        {"k": "sost_sped", "label": "± Sostituzioni in spedizione (al cliente è stato spedito un prodotto diverso da quello fatturato)", "val": r(sost_delta), "drill": True},
+        {"k": "ricnf_nofatt", "label": "+ Merce ricevuta dai fornitori ma non ancora fatturata", "val": r(-ab["nofatt"]), "drill": True},
         # -- media certezza: chiare ma da verificare --
-        {"k": "ricnf_dopo", "label": "+ Ricevuto e fatturato DOPO il periodo (fatture fornitori di giugno+) — da verificare", "val": r(-ab["dopo"]), "drill": True},
-        {"k": "glnodoc", "label": "± Registrazioni a conto materiale SENZA documento (giroconti contabili: es. \"merci in transito\")", "val": r(ab["glnodoc"]), "drill": True},
-        {"k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (GL dazi/trasporti import − nostro carico) — da approfondire", "val": r(oneri_contrib), "drill": True},
-        {"k": "ricnf_prec", "label": "− Acquisti: merce ricevuta nel periodo, fattura registrata in periodo precedente (cross-anno reale dic→gen)", "val": r(-ab["prec"]), "drill": True},
-        {"k": "uscita_prec", "label": "+ Spedito nel periodo ma FATTURATO PRIMA (fattura/ricevuta di periodo precedente, B2C cross-anno)", "val": r(sped_ap), "drill": True},
-        {"k": "uscita_diff", "label": "+ Spedito su DDT/ordine, fattura DIFFERITA o non emessa (B2B) / senza ordine collegato", "val": r(sped_res), "drill": True},
+        {"k": "ricnf_dopo", "label": "+ Merce ricevuta nel periodo, fatturata dal fornitore nei mesi successivi — da verificare", "val": r(-ab["dopo"]), "drill": True},
+        {"k": "glnodoc", "label": "± Scritture contabili sul conto materiali senza documento (giroconti, es. merci in transito)", "val": r(ab["glnodoc"]), "drill": True},
+        {"k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (dazi, trasporti d'importazione): in contabilità rispetto a magazzino — da approfondire", "val": r(oneri_contrib), "drill": True},
+        {"k": "ricnf_prec", "label": "− Merce ricevuta nel periodo ma già fatturata nel periodo precedente (a cavallo d'anno)", "val": r(-ab["prec"]), "drill": True},
+        {"k": "uscita_prec", "label": "+ Merce spedita nel periodo ma fatturata prima (vendita a cavallo di periodo)", "val": r(sped_ap), "drill": True},
+        {"k": "uscita_diff", "label": "+ Merce spedita su bolla/ordine con fattura differita o non ancora emessa, o senza ordine collegato", "val": r(sped_res), "drill": True},
     ]
     spiegato = cogs + sum(c["val"] for c in comp)
     non_giust = consumo_bil - spiegato                     # NON forzato a zero: e' il vero scarto non spiegato
-    righe_out = ([{"n": 1, "k": "cogs", "label": "Costo del venduto CDG — X (abbinato al fatturato, incl. sostituzioni gratuite a ricavo 0)", "val": r(cogs), "tot": True, "drill": True}]
+    righe_out = ([{"n": 1, "k": "cogs", "label": "Costo del venduto (dal nostro calcolo, abbinato al fatturato — incluse le sostituzioni gratuite)", "val": r(cogs), "tot": True, "drill": True}]
                  + [dict(c, n=i + 2) for i, c in enumerate(comp)]
-                 + [{"n": len(comp) + 2, "k": "spiegato", "label": "= Totale spiegato (X + componenti misurate)", "val": r(spiegato), "tot": True},
-                    {"n": len(comp) + 3, "k": "non_giust", "label": "≠ DIFFERENZA NON GIUSTIFICATA (Y − spiegato) — scarto reale, da dettagliare", "val": r(non_giust), "drill": False},
-                    {"n": len(comp) + 4, "k": "bilancio", "label": "= Consumo materie a CONTABILITÀ — Y (Acquisti GL ± Δrimanenze)", "val": r(consumo_bil), "tot": True}])
+                 + [{"n": len(comp) + 2, "k": "spiegato", "label": "= Totale spiegato (costo del venduto + le voci qui sopra)", "val": r(spiegato), "tot": True},
+                    {"n": len(comp) + 3, "k": "non_giust", "label": "≠ DIFFERENZA ANCORA DA SPIEGARE (scarto reale tra i due mondi, da dettagliare)", "val": r(non_giust), "drill": False},
+                    {"n": len(comp) + 4, "k": "bilancio", "label": "= Consumo di materie a CONTABILITÀ (acquisti ± variazione delle rimanenze)", "val": r(consumo_bil), "tot": True}])
     ord_ns = righe("SELECT COUNT(*) n " + _ORD_NON_SPEDITI_FROM, fine=_fine_periodo(anno, ma))[0]["n"]
     return jsonify({"anno": anno, "mese_da": mda, "mese_a": ma, "righe": righe_out,
                     "contabile": {"acquisti": r(gl_acq), "rim_iniz": r(rin_b), "rim_fin": r(rfin_b),
@@ -1305,33 +1305,102 @@ def api_riconciliazione_imb_forn():
     MAGAZZINO = movimenti di carico imballi (505 KLACQ-OA) del fornitore. Stesso periodo."""
     anno, mda, ma = _ric_periodo()
     cod = request.args.get("cod", "")
-    conta = righe("""SELECT 'CONTABILITA' AS lato,
-            CASE WHEN je.CRRefType=27066402 THEN 'fattura acquisto' ELSE 'prima nota diretta' END AS tipo,
-            ISNULL(pd.DocNo, je.DocNo) AS documento, NULLIF(ISNULL(pd.SupplierDocNo, je.DocNo),'') AS nr_fornitore,
-            CONVERT(varchar(10),CAST(je.DocumentDate AS date),103) AS data,
-            ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS importo
+    fn = lambda v: float(v or 0)
+    # CONTABILITA' del fornitore su 06021505: fatture (F) e prima nota diretta (D)
+    g = righe("""SELECT
+            ISNULL(SUM(CASE WHEN je.CRRefType=27066402 THEN (CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) ELSE 0 END),0) F,
+            ISNULL(SUM(CASE WHEN je.CRRefType<>27066402 THEN (CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) ELSE 0 END),0) D
         FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
         JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
-        LEFT JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID AND je.CRRefType=27066402
         WHERE g.Account='06021505' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
           AND EXISTS (SELECT 1 FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g2
+              WHERE g2.JournalEntryId=g.JournalEntryId AND g2.Account LIKE '0502%' AND g2.CustSupp=:cod)""",
+        a=anno, d=mda, h=ma, cod=cod)[0]
+    F = fn(g["F"]); D = fn(g["D"])
+    r = lambda x: round(x, 2)
+    # MATCH PER DOCUMENTO: ogni fattura del fornitore su 06021505 (costo registrato Z) agganciata al suo
+    # CARICO a magazzino (Y) via la catena bolla->movimento (DerivedDocType 27066370). Differenza W = Z − Y.
+    fatt = righe("""
+      WITH glf AS (
+        SELECT je.CRRefID AS fattid, pd.DocNo AS prot, NULLIF(pd.SupplierDocNo,'') AS nrf,
+               CONVERT(varchar(10),CAST(MIN(je.DocumentDate) AS date),103) AS data,
+               SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) AS Z
+        FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID
+        WHERE g.Account='06021505' AND je.CRRefType=27066402
+          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+          AND EXISTS (SELECT 1 FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g2
               WHERE g2.JournalEntryId=g.JournalEntryId AND g2.Account LIKE '0502%' AND g2.CustSupp=:cod)
-        GROUP BY je.CRRefType, ISNULL(pd.DocNo, je.DocNo), NULLIF(ISNULL(pd.SupplierDocNo, je.DocNo),''), CAST(je.DocumentDate AS date)
-        ORDER BY ABS(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END)) DESC""",
-        a=anno, d=mda, h=ma, cod=cod)
-    mag = righe("""SELECT 'MAGAZZINO' AS lato, 'carico (movimento)' AS tipo,
-            h.DocNo AS documento, NULL AS nr_fornitore,
-            CONVERT(varchar(10),CAST(h.PostingDate AS date),103) AS data,
-            ROUND(SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END),2) AS importo
+        GROUP BY je.CRRefID, pd.DocNo, NULLIF(pd.SupplierDocNo,'')),
+      carico_imb AS (
+        SELECT h.EntryId, SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END) val
         FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
         JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='IMBALLAGGIO'
         WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND h.CancelPhase1='0' AND h.CancelPhase2='0'
-          AND h.CustSupp=:cod AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
-        GROUP BY h.DocNo, CAST(h.PostingDate AS date)
-        ORDER BY ABS(SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END)) DESC""",
-        a=anno, d=mda, h=ma, cod=cod)
-    return jsonify(conta + mag)
+          AND h.CustSupp=:cod AND YEAR(h.PostingDate)=:a
+        GROUP BY h.EntryId),
+      mov2b AS (SELECT DISTINCT x.DerivedDocID AS entryid, x.OriginDocID AS bollaid
+                FROM KODICEBAGNO_4.dbo.MA_CrossReferences x WHERE x.DerivedDocType=27066370),
+      b2f AS (SELECT DISTINCT x.DerivedDocID AS fattid, x.OriginDocID AS bollaid
+              FROM KODICEBAGNO_4.dbo.MA_CrossReferences x WHERE x.DerivedDocType=27066402),
+      ypf AS (SELECT b2f.fattid, SUM(ci.val) AS Y
+              FROM carico_imb ci JOIN mov2b ON mov2b.entryid=ci.EntryId JOIN b2f ON b2f.bollaid=mov2b.bollaid
+              GROUP BY b2f.fattid)
+      SELECT glf.prot AS documento, glf.nrf AS nr_fornitore, glf.data AS data,
+             ROUND(ISNULL(ypf.Y,0),2) AS caricato_magazzino, ROUND(glf.Z,2) AS costo_registrato,
+             ROUND(glf.Z-ISNULL(ypf.Y,0),2) AS differenza
+      FROM glf LEFT JOIN ypf ON ypf.fattid=glf.fattid
+      OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
+    # prima nota diretta del fornitore: per documento, mai a magazzino (Y=0)
+    diretti = righe("""SELECT je.DocNo AS documento, NULL AS nr_fornitore,
+            CONVERT(varchar(10),CAST(je.DocumentDate AS date),103) AS data,
+            0 AS caricato_magazzino,
+            ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS costo_registrato,
+            ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS differenza
+        FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+        WHERE g.Account='06021505' AND je.CRRefType<>27066402
+          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+          AND EXISTS (SELECT 1 FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g2
+              WHERE g2.JournalEntryId=g.JournalEntryId AND g2.Account LIKE '0502%' AND g2.CustSupp=:cod)
+        GROUP BY je.DocNo, CAST(je.DocumentDate AS date)""", a=anno, d=mda, h=ma, cod=cod)
+    # Riga per documento, in LINGUA DA CONTROLLER (no gergo tecnico): cosa è entrato a magazzino, cosa è a costo,
+    # la differenza e la CAUSA in parole. Deve essere leggibile/mostrabile senza che un tecnico la spieghi.
+    def riga(doc, nrf, data, Y, Z, causa):
+        return {"Documento": doc, "Nr. fornitore": nrf, "Data": data,
+                "Caricato a magazzino": r(Y), "Costo registrato in contabilità": r(Z),
+                "Differenza": r(Z - Y), "Causa della differenza": causa}
+    out = []
+    for x in fatt:
+        Y = fn(x["caricato_magazzino"]); Z = fn(x["costo_registrato"])
+        if abs(Z - Y) < 0.01:        causa = "quadra ✓"
+        elif Y == 0:                 causa = "fattura non collegata a un carico di magazzino"
+        else:                        causa = "righe senza codice articolo nella fattura (non caricate a magazzino)"
+        out.append(riga(x["documento"], x["nr_fornitore"], x["data"], Y, Z, causa))
+    for x in diretti:
+        Z = fn(x["costo_registrato"])
+        out.append(riga(x["documento"], x["nr_fornitore"], x["data"], 0.0, Z,
+                        "messa a costo diretto in prima nota (mai passata da magazzino)"))
+    # carico del fornitore NON agganciato ad alcuna fattura del periodo (sfasamento competenza / fattura su altro conto)
+    C_tot = fn(righe("""SELECT ISNULL(SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END),0) C
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='IMBALLAGGIO'
+        WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND h.CancelPhase1='0' AND h.CancelPhase2='0'
+          AND h.CustSupp=:cod AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""",
+        a=anno, d=mda, h=ma, cod=cod)[0]["C"])
+    orfano = r(C_tot - sum(fn(x["caricato_magazzino"]) for x in fatt))
+    if abs(orfano) >= 0.01:
+        out.append(riga("merce a magazzino non ancora fatturata", None, None, orfano, 0.0,
+                        "carico ricevuto nel periodo ma fattura non ancora registrata"))
+    out.sort(key=lambda x: -abs(fn(x["Differenza"])))
+    out.append({"Documento": "TOTALE", "Nr. fornitore": None, "Data": None,
+                "Caricato a magazzino": r(sum(fn(x["Caricato a magazzino"]) for x in out)),
+                "Costo registrato in contabilità": r(sum(fn(x["Costo registrato in contabilità"]) for x in out)),
+                "Differenza": r(sum(fn(x["Differenza"]) for x in out)), "Causa della differenza": ""})
+    return jsonify(out)
 
 
 @app.get("/api/raccordo_proposte")
@@ -2085,10 +2154,10 @@ async function ricDrillForn(cod,i){
   const d=await j(`/api/riconciliazione_imb_forn?anno=${a}&mese_da=1&mese_a=${m}&cod=${encodeURIComponent(cod)}`);
   if(!d || !d.length){ box.innerHTML='<p class="muted">Nessun documento per questo fornitore.</p>'; return; }
   const cols=Object.keys(d[0]);
-  const isEuro=c=>/importo|val/i.test(c);
+  const isEuro=c=>/importo|val|caric|costo|differ|magazz/i.test(c);
   const fmt=(c,v)=> (typeof v==='number') ? (isEuro(c)?eur(v):Number(v).toLocaleString('it-IT',{useGrouping:"always"})) : esc(String(v==null?'':v));
-  let t=`<table class="sticky"><thead><tr>${cols.map(c=>`<th class="${typeof d[0][c]==='number'?'num':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>`;
-  t+=d.map(r=>`<tr${r.lato==='MAGAZZINO'?' style="background:#f3faf5"':''}>${cols.map(c=>`<td class="${typeof r[c]==='number'?'num':''}">${fmt(c,r[c])}</td>`).join('')}</tr>`).join('');
+  let t=`<table class="sticky"><thead><tr>${cols.map(c=>`<th class="${typeof d[0][c]==='number'?'num':''}">${esc(c.replace(/_/g,' '))}</th>`).join('')}</tr></thead><tbody>`;
+  t+=d.map(r=>`<tr${r.Documento==='TOTALE'?' style="font-weight:700;border-top:2px solid var(--line)"':''}>${cols.map(c=>`<td class="${typeof r[c]==='number'?'num':''}">${fmt(c,r[c])}</td>`).join('')}</tr>`).join('');
   t+=`</tbody></table>`;
   box.innerHTML=`<div style="max-height:48vh;overflow:auto">${t}</div>`;
 }
