@@ -159,28 +159,59 @@ def parse_righe(contenuto: bytes, nome_file: str) -> list[dict]:
     return righe
 
 
-def importa(config: dict, contenuto: bytes, nome_file: str) -> dict:
+def riepilogo(contenuto: bytes, nome_file: str) -> dict:
+    """Legge il file SENZA caricarlo e restituisce i valori disponibili per la scelta
+    (Vettore / Destino / Anno / Mese), come faceva la maschera della solution C#."""
+    righe = parse_righe(contenuto, nome_file)
+    return {
+        "righe": len(righe),
+        "vettori": sorted({r["vettore"] for r in righe if r["vettore"]}),
+        "destini": sorted({r["destino"] for r in righe if r["destino"]}),
+        "anni":    sorted({r["anno"] for r in righe}),
+        "mesi":    sorted({r["mese"] for r in righe}),
+    }
+
+
+def _passa_filtro(r: dict, filtri: dict | None) -> bool:
+    """Tiene la riga se rispetta i filtri scelti (vuoto/None = qualsiasi)."""
+    if not filtri:
+        return True
+    if filtri.get("vettore") and r["vettore"] != filtri["vettore"]:
+        return False
+    if filtri.get("destino") and r["destino"] != filtri["destino"]:
+        return False
+    if filtri.get("anno") and r["anno"] != int(filtri["anno"]):
+        return False
+    if filtri.get("mese") and r["mese"] != int(filtri["mese"]):
+        return False
+    return True
+
+
+def importa(config: dict, contenuto: bytes, nome_file: str, filtri: dict | None = None) -> dict:
     """
-    Carica il file in src.fattura_vettore_riga. Per ogni (anno, mese, vettore)
-    presente nel file, sostituisce le righe gia' caricate. Restituisce un riepilogo.
+    Carica il file in src.fattura_vettore_riga, eventualmente filtrando per
+    Vettore/Destino/Anno/Mese (come la maschera C#). Sostituisce le righe gia'
+    caricate per le combinazioni (anno, mese, vettore, destino) presenti nella
+    selezione, cosi' ricaricare la stessa fattura non duplica e non tocca le altre.
     """
     from sqlalchemy import text
     from db import _engine
 
-    righe = parse_righe(contenuto, nome_file)
+    righe = [r for r in parse_righe(contenuto, nome_file) if _passa_filtro(r, filtri)]
     if not righe:
-        return {"righe": 0, "periodi": [], "messaggio": "Nessuna riga valida nel file."}
+        return {"righe": 0, "periodi": [], "messaggio": "Nessuna riga corrisponde alla selezione."}
 
-    # combinazioni (anno, mese, vettore) da sostituire
-    combo = sorted({(r["anno"], r["mese"], r["vettore"]) for r in righe})
+    # combinazioni (anno, mese, vettore, destino) da sostituire
+    combo = sorted({(r["anno"], r["mese"], r["vettore"], r["destino"]) for r in righe})
 
     eng = _engine(config, config["database"]["dwh"])
     with eng.begin() as conn:
-        for anno, mese, vettore in combo:
+        for anno, mese, vettore, destino in combo:
             conn.execute(
                 text("DELETE FROM src.fattura_vettore_riga "
-                     "WHERE anno=:a AND mese=:m AND ISNULL(vettore,'')=ISNULL(:v,'')"),
-                {"a": anno, "m": mese, "v": vettore},
+                     "WHERE anno=:a AND mese=:m AND ISNULL(vettore,'')=ISNULL(:v,'') "
+                     "AND ISNULL(destino,'')=ISNULL(:d,'')"),
+                {"a": anno, "m": mese, "v": vettore, "d": destino},
             )
         conn.execute(
             text("""

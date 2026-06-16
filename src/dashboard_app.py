@@ -1680,15 +1680,38 @@ def api_consolida_mese():
 
 
 # ----------------------------------------------------------------------------- TRASPORTI
-@app.post("/api/trasporto_importa")
-def api_trasporto_importa():
-    """Importa il riepilogativo vettori (CSV/Excel) in src.fattura_vettore_riga (upload dalla dashboard)."""
+@app.post("/api/trasporto_preview")
+def api_trasporto_preview():
+    """Legge il file (senza caricarlo) e restituisce Vettore/Destino/Anno/Mese disponibili,
+    per far scegliere il sottoinsieme da importare (come la maschera della solution C#)."""
     f = request.files.get("file")
     if not f or not f.filename:
         return jsonify({"ok": False, "errore": "Nessun file ricevuto."}), 400
+    from src.import_fatture_vettori import riepilogo
+    try:
+        d = riepilogo(f.read(), f.filename)
+    except Exception as e:
+        return jsonify({"ok": False, "errore": str(e)}), 400
+    d["ok"] = True
+    return jsonify(d)
+
+
+@app.post("/api/trasporto_importa")
+def api_trasporto_importa():
+    """Importa il riepilogativo vettori (CSV/Excel) in src.fattura_vettore_riga, filtrando per
+    Vettore/Destino/Anno/Mese scelti dall'utente (campi vuoti = qualsiasi)."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "errore": "Nessun file ricevuto."}), 400
+    filtri = {
+        "vettore": (request.form.get("vettore") or "").strip() or None,
+        "destino": (request.form.get("destino") or "").strip() or None,
+        "anno":    (request.form.get("anno") or "").strip() or None,
+        "mese":    (request.form.get("mese") or "").strip() or None,
+    }
     from src.import_fatture_vettori import importa
     try:
-        esito = importa(cfg, f.read(), f.filename)
+        esito = importa(cfg, f.read(), f.filename, filtri)
     except Exception as e:
         return jsonify({"ok": False, "errore": str(e)}), 400
     esito["ok"] = True
@@ -2094,11 +2117,18 @@ PAGINA = r"""<!DOCTYPE html>
         al <strong>documento</strong>, e si ripartisce sulle righe in proporzione al valore. Entra nel <strong>Margine di Contribuzione III</strong>.</p>
         <div class="solo-validazione" style="margin:10px 0;padding:10px;border:1px dashed var(--line);border-radius:8px">
           <strong>🔧 Caricamento riepilogativo vettori</strong>
-          <p class="muted" style="margin:4px 0 8px">File CSV o Excel scaricato da Google Sheet (colonne: Trasportatore, Anno, Mese, Tipo Spedizione, N. rif. Cliente, Nolo, Spese Accessorie, Totale…).</p>
+          <p class="muted" style="margin:4px 0 8px">File CSV o Excel scaricato da Google Sheet. <strong>Passo 1</strong>: leggi il file; <strong>passo 2</strong>: scegli vettore, destino e periodo da importare (come nella vecchia maschera); <strong>passo 3</strong>: importa ed elabora.</p>
           <input type="file" id="traspFile" accept=".csv,.xlsx,.xls">
-          <button onclick="trasportoImporta()">Carica nel datawarehouse</button>
-          <button onclick="trasportoElabora()" title="Ricostruisce il legame ordine→documento e propaga il costo ai margini">Elabora e imputa ai margini</button>
-          <span id="traspMsg" class="muted"></span>
+          <button onclick="trasportoLeggi()">1 · Leggi file</button>
+          <div id="traspScelta" style="display:none;margin-top:8px;flex-wrap:wrap;gap:8px;align-items:end">
+            <label>Vettore<br><select id="traspVettore"></select></label>
+            <label>Destino<br><select id="traspDestino"></select></label>
+            <label>Anno<br><select id="traspAnno"></select></label>
+            <label>Mese<br><select id="traspMese"></select></label>
+            <button onclick="trasportoImporta()">2 · Importa la selezione</button>
+            <button onclick="trasportoElabora()" title="Ricostruisce il legame ordine→documento e propaga il costo ai margini">3 · Elabora e imputa</button>
+          </div>
+          <div id="traspMsg" class="muted" style="margin-top:6px"></div>
         </div>
         <div id="traspRic"></div>
       </div>
@@ -2377,16 +2407,45 @@ async function consolidaMese(riapri){
 }
 
 // ---- TRASPORTI -------------------------------------------------------------
-async function trasportoImporta(){
+function _opts(arr, conTutti){
+  let o = conTutti ? '<option value="">(Tutti)</option>' : '';
+  return o + (arr||[]).map(v=>`<option value="${esc(String(v))}">${esc(String(v))}</option>`).join('');
+}
+async function trasportoLeggi(){
   const inp=$("#traspFile"); const msg=$("#traspMsg");
   if(!inp.files.length){ msg.textContent='Scegli prima un file.'; return; }
-  msg.textContent='Caricamento in corso…';
+  msg.textContent='Lettura del file…';
   const fd=new FormData(); fd.append('file', inp.files[0]);
+  try{
+    const r=await fetch('/api/trasporto_preview',{method:'POST',body:fd});
+    const d=await r.json();
+    if(!d.ok){ msg.textContent='Errore: '+(d.errore||'sconosciuto'); return; }
+    $("#traspVettore").innerHTML=_opts(d.vettori,false);
+    $("#traspDestino").innerHTML=_opts(d.destini,true);
+    $("#traspAnno").innerHTML=_opts(d.anni,false);
+    $("#traspMese").innerHTML=_opts(d.mesi,false);
+    // default: ultimo anno e ultimo mese disponibili
+    if(d.anni&&d.anni.length) $("#traspAnno").value=String(d.anni[d.anni.length-1]);
+    if(d.mesi&&d.mesi.length) $("#traspMese").value=String(d.mesi[d.mesi.length-1]);
+    $("#traspScelta").style.display='flex';
+    msg.textContent=`Lette ${num(d.righe)} righe. Scegli vettore, destino e periodo, poi importa.`;
+  }catch(e){ msg.textContent='Errore: '+e; }
+}
+async function trasportoImporta(){
+  const inp=$("#traspFile"); const msg=$("#traspMsg");
+  if(!inp.files.length){ msg.textContent='Scegli prima un file e premi "Leggi file".'; return; }
+  msg.textContent='Importazione in corso…';
+  const fd=new FormData();
+  fd.append('file', inp.files[0]);
+  fd.append('vettore', $("#traspVettore").value);
+  fd.append('destino', $("#traspDestino").value);
+  fd.append('anno', $("#traspAnno").value);
+  fd.append('mese', $("#traspMese").value);
   try{
     const r=await fetch('/api/trasporto_importa',{method:'POST',body:fd});
     const d=await r.json();
     if(!d.ok){ msg.textContent='Errore: '+(d.errore||'sconosciuto'); return; }
-    msg.textContent=d.messaggio+' Periodi: '+(d.periodi||[]).join(', ')+'.';
+    msg.textContent=d.messaggio+' Periodi: '+(d.periodi||[]).join(', ')+'. Ora premi "Elabora e imputa".';
     caricaTrasporti();
   }catch(e){ msg.textContent='Errore: '+e; }
 }
