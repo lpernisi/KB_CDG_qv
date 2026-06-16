@@ -1189,10 +1189,25 @@ def api_raccordo_proposte():
                rp.FatturaId, sd.DocNo AS fattura, CONVERT(varchar(10), rp.FatturaDate, 103) AS data_fattura,
                ISNULL(csf.CompanyName, sd.CustSupp) AS cliente_fatt, sd.CustSupp AS cliente_fatt_cod,
                rp.GgDiff AS giorni, rp.ArtComuni AS art_comuni, rp.NumCandidati AS candidati, rp.Stato,
-               (SELECT STRING_AGG(z.Item, ', ') FROM (SELECT DISTINCT LTRIM(RTRIM(d.Item)) AS Item
-                    FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d WHERE d.EntryId = rp.MovEntryId) z) AS art_sped,
+               -- SPEDITO: ogni articolo con ✓ se combacia con la fattura ESPLOSA (kit->componenti)
+               (SELECT STRING_AGG(CASE WHEN fx.Item IS NOT NULL THEN N'✓ ' + z.Item ELSE z.Item END, ', ')
+                  FROM (SELECT DISTINCT LTRIM(RTRIM(d.Item)) AS Item
+                        FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d WHERE d.EntryId = rp.MovEntryId) z
+                  LEFT JOIN (SELECT DISTINCT bx.Item FROM KODICEBAGNO_4.dbo.MA_SaleDocDetail bd
+                       CROSS APPLY (SELECT LTRIM(RTRIM(dd.Component)) AS Item FROM kodice.vw_distinta dd WHERE LTRIM(RTRIM(dd.BOM))=LTRIM(RTRIM(bd.Item))
+                                    UNION ALL SELECT LTRIM(RTRIM(bd.Item)) WHERE NOT EXISTS (SELECT 1 FROM kodice.vw_distinta dd WHERE LTRIM(RTRIM(dd.BOM))=LTRIM(RTRIM(bd.Item)))) bx
+                       WHERE bd.SaleDocId = rp.FatturaId) fx ON fx.Item = z.Item) AS art_sped,
+               -- FATTURA come da documento (codici padre, eventuali KIT)
                (SELECT STRING_AGG(z.Item, ', ') FROM (SELECT DISTINCT LTRIM(RTRIM(dd.Item)) AS Item
                     FROM KODICEBAGNO_4.dbo.MA_SaleDocDetail dd WHERE dd.SaleDocId = rp.FatturaId) z) AS art_fatt,
+               -- FATTURA ESPLOSA (kit aperti in componenti): ✓ su quelli che combaciano con lo spedito
+               (SELECT STRING_AGG(CASE WHEN sp.Item IS NOT NULL THEN N'✓ ' + x.Item ELSE x.Item END, ', ')
+                  FROM (SELECT DISTINCT bx.Item FROM KODICEBAGNO_4.dbo.MA_SaleDocDetail bd
+                       CROSS APPLY (SELECT LTRIM(RTRIM(dd.Component)) AS Item FROM kodice.vw_distinta dd WHERE LTRIM(RTRIM(dd.BOM))=LTRIM(RTRIM(bd.Item))
+                                    UNION ALL SELECT LTRIM(RTRIM(bd.Item)) WHERE NOT EXISTS (SELECT 1 FROM kodice.vw_distinta dd WHERE LTRIM(RTRIM(dd.BOM))=LTRIM(RTRIM(bd.Item)))) bx
+                       WHERE bd.SaleDocId = rp.FatturaId) x
+                  LEFT JOIN (SELECT DISTINCT LTRIM(RTRIM(d.Item)) AS Item
+                        FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d WHERE d.EntryId = rp.MovEntryId) sp ON sp.Item = x.Item) AS art_fatt_esp,
                ROW_NUMBER() OVER (PARTITION BY rp.MovEntryId ORDER BY rp.GgDiff, rp.ArtComuni DESC) AS rank_best
         FROM kodice.raccordo_proposto rp
         JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = rp.FatturaId
@@ -1837,16 +1852,19 @@ function raccBlock(c){
       <div style="font-size:12.5px;background:#f3f1ea;padding:5px 7px;border-radius:4px">
          <strong>SPEDIZIONE</strong> · ordine ${esc(h0.ordine||'-')} · DDT ${esc(h0.ddt||'-')} · ${h0.spedito}
          &nbsp; cliente <strong>${esc(h0.cliente_sped||'')}</strong> (${esc(h0.cliente_sped_cod||'')}) ${badge}
-         <br><span class="muted">articoli:</span> ${esc(h0.art_sped||'-')}</div>
+         <br><span class="muted">spedito:</span> ${esc(h0.art_sped||'-')}</div>
       <table style="margin-top:6px;width:100%"><tbody>`;
   c.forEach(r=>{
     const stessoCliente=(r.cliente_fatt_cod===h0.cliente_sped_cod);
+    // mostra l'esploso solo se diverso dai codici doc (cioe' c'e' un kit): cosi' VEDI i componenti che combaciano
+    const esploso = (r.art_fatt_esp && r.art_fatt_esp!==r.art_fatt)
+        ? `<br><span class="muted">fattura ESPLOSA (kit→componenti, ✓=combacia):</span> ${esc(r.art_fatt_esp)}` : '';
     h+=`<tr style="border-top:1px solid var(--line)"><td style="width:24px;vertical-align:top;padding-top:6px">
           <input type="radio" name="rc_${mv}" value="${r.FatturaId}" ${r.rank_best===1?'checked':''}></td>
         <td style="padding:4px 0"><strong>FATTURA ${esc(r.fattura||'')}</strong> del ${r.data_fattura}
           &nbsp; cliente ${stessoCliente?'✓ stesso':'⚠ DIVERSO'} <strong>${esc(r.cliente_fatt||'')}</strong> (${esc(r.cliente_fatt_cod||'')})
           &nbsp; <span class="muted">${r.giorni}gg · ${r.art_comuni} art. in comune</span>
-          <br><span class="muted">articoli:</span> ${esc(r.art_fatt||'-')}</td></tr>`;
+          <br><span class="muted">fattura (documento):</span> ${esc(r.art_fatt||'-')}${esploso}</td></tr>`;
   });
   h+=`</tbody></table><div style="margin-top:6px"><button onclick="raccordoAzione(${mv},'conferma')">Conferma</button>
        <button onclick="raccordoAzione(${mv},'rifiuta')" style="margin-left:6px">Rifiuta</button></div></div>`;
