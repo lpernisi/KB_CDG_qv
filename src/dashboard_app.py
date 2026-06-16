@@ -1679,6 +1679,110 @@ def api_consolida_mese():
     return jsonify({"ok": True})
 
 
+# ----------------------------------------------------------------------------- TRASPORTI
+@app.post("/api/trasporto_importa")
+def api_trasporto_importa():
+    """Importa il riepilogativo vettori (CSV/Excel) in src.fattura_vettore_riga (upload dalla dashboard)."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "errore": "Nessun file ricevuto."}), 400
+    from src.import_fatture_vettori import importa
+    try:
+        esito = importa(cfg, f.read(), f.filename)
+    except Exception as e:
+        return jsonify({"ok": False, "errore": str(e)}), 400
+    esito["ok"] = True
+    return jsonify(esito)
+
+
+@app.post("/api/trasporto_elabora")
+def api_trasporto_elabora():
+    """(Ri)costruisce il ponte ordine->documento dell'anno e propaga il costo trasporto: per ogni mese
+    gia' elaborato (presente in core.fatto_riga) rilancia il componente TRASPORTO e riassembla i margini."""
+    anno = int((request.get_json(force=True) or {}).get("anno", 2026))
+    with engine.begin() as c:
+        c.exec_driver_sql(f"EXEC kodice.usp_build_ordine_documento @Anno = {anno};")
+        mesi = [r[0] for r in c.exec_driver_sql(
+            f"SELECT DISTINCT mese FROM core.fatto_riga WHERE anno = {anno} ORDER BY mese")]
+        for m in mesi:
+            c.exec_driver_sql(f"EXEC dbo.usp_comp_TRASPORTO @anno={anno}, @mese={m};")
+            c.exec_driver_sql(f"EXEC dbo.usp_build_fatto_riga @anno={anno}, @mese={m};")
+    return jsonify({"ok": True, "anno": anno, "mesi": mesi})
+
+
+@app.get("/api/trasporto_riconciliazione")
+def api_trasporto_riconciliazione():
+    """Riconciliazione del costo vettori del mese di SPEDIZIONE: dove e' finito ogni euro.
+    Identita': Totale = Imputato al venduto + Ordine non ancora fatturato + Riferimento non riconosciuto + Rientri."""
+    a = int(request.args.get("anno")); m = int(request.args.get("mese"))
+    sint = righe("""
+        SELECT
+          CAST(SUM(fvr.totale) AS DECIMAL(18,2)) AS totale,
+          CAST(SUM(CASE WHEN fvr.tipo_spedizione='RIENTRO' THEN fvr.totale ELSE 0 END) AS DECIMAL(18,2)) AS rientri,
+          CAST(SUM(CASE WHEN fvr.tipo_spedizione='SPEDIZIONE' AND od.FatturaId IS NOT NULL
+                        THEN fvr.totale ELSE 0 END) AS DECIMAL(18,2)) AS agganciato,
+          CAST(SUM(CASE WHEN fvr.tipo_spedizione='SPEDIZIONE' AND od.SaleOrdId IS NOT NULL AND od.FatturaId IS NULL
+                        THEN fvr.totale ELSE 0 END) AS DECIMAL(18,2)) AS ordine_non_fatturato,
+          CAST(SUM(CASE WHEN fvr.tipo_spedizione='SPEDIZIONE' AND od.SaleOrdId IS NULL
+                        THEN fvr.totale ELSE 0 END) AS DECIMAL(18,2)) AS rif_non_riconosciuto,
+          COUNT(*) AS n_spedizioni
+        FROM src.fattura_vettore_riga fvr
+        LEFT JOIN kodice.ordine_documento od ON od.InternalOrdNo = fvr.rif_ordine
+        WHERE fvr.anno=:a AND fvr.mese=:m
+    """, a=a, m=m)
+    imp = righe("""SELECT CAST(SUM(importo) AS DECIMAL(18,2)) AS importo, COUNT(*) AS righe
+                   FROM core.componente_riga WHERE anno=:a AND mese=:m AND codice_componente='TRASPORTO'""", a=a, m=m)
+    vet = righe("""SELECT ISNULL(vettore,'(n/d)') AS vettore, CAST(SUM(totale) AS DECIMAL(18,2)) AS tot, COUNT(*) AS n
+                   FROM src.fattura_vettore_riga WHERE anno=:a AND mese=:m
+                   GROUP BY vettore ORDER BY SUM(totale) DESC""", a=a, m=m)
+    return jsonify({"sintesi": sint[0] if sint else {}, "imputato": imp[0] if imp else {}, "vettori": vet})
+
+
+@app.get("/api/trasporto_config")
+def api_trasporto_config():
+    """Regole di stima del trasporto per fascia di peso (livello 1) + i canali/aree presenti nei dati
+    (per aiutare a compilare). Le righe sono ordinate per canale/area/fascia."""
+    regole = righe("""SELECT id, canale, area, peso_da_kg, peso_a_kg, costo_eur,
+                             CONVERT(varchar(10), valido_dal, 23) AS valido_dal, note
+                      FROM cfg.trasporto_stima_peso
+                      ORDER BY canale, area, peso_da_kg, valido_dal""")
+    canali = [r["canale"] for r in righe(
+        "SELECT DISTINCT canale FROM kodice.vw_doc_trasporto WHERE canale IS NOT NULL ORDER BY canale")]
+    return jsonify({"regole": regole, "canali": canali})
+
+
+@app.post("/api/trasporto_config_salva")
+def api_trasporto_config_salva():
+    """Inserisce o aggiorna una regola di stima (UI config). id mancante/0 = nuova riga."""
+    d = request.get_json(force=True) or {}
+    p = {
+        "id": int(d.get("id") or 0),
+        "canale": (d.get("canale") or "*").strip() or "*",
+        "area": (d.get("area") or "*").strip() or "*",
+        "pda": float(d.get("peso_da_kg") or 0),
+        "pa": float(d.get("peso_a_kg") or 0),
+        "costo": float(d.get("costo_eur") or 0),
+        "dal": (d.get("valido_dal") or "2026-01-01"),
+        "note": (d.get("note") or None),
+    }
+    with engine.begin() as c:
+        if p["id"]:
+            c.execute(text("""UPDATE cfg.trasporto_stima_peso SET canale=:canale, area=:area,
+                peso_da_kg=:pda, peso_a_kg=:pa, costo_eur=:costo, valido_dal=:dal, note=:note WHERE id=:id"""), p)
+        else:
+            c.execute(text("""INSERT INTO cfg.trasporto_stima_peso (canale, area, peso_da_kg, peso_a_kg, costo_eur, valido_dal, note)
+                VALUES (:canale,:area,:pda,:pa,:costo,:dal,:note)"""), p)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/trasporto_config_elimina")
+def api_trasporto_config_elimina():
+    d = request.get_json(force=True) or {}
+    with engine.begin() as c:
+        c.execute(text("DELETE FROM cfg.trasporto_stima_peso WHERE id=:id"), {"id": int(d.get("id"))})
+    return jsonify({"ok": True})
+
+
 # Espressioni di dimensione del CE (condivise tra /api/ce e /api/ce_drill).
 CE_DIMS = {
     "canale":        "CASE WHEN sd.CustSupp='135774' THEN 'SAVINI' ELSE COALESCE(NULLIF(LTRIM(RTRIM(ctg.Notes)),''), opt.Category, '(n/d)') END",
@@ -1915,7 +2019,7 @@ PAGINA = r"""<!DOCTYPE html>
     <div class="sec" data-s="materiali" onclick="sezione('materiali')">Costo dei materiali</div>
     <div class="sec" data-s="riconc" onclick="sezione('riconc')">Riconciliazione ↔ Co.Ge.</div>
     <div class="sec todo" data-s="commerciali" onclick="sezione('commerciali')">Costi commerciali</div>
-    <div class="sec todo" data-s="trasporti" onclick="sezione('trasporti')">Costi di trasporto</div>
+    <div class="sec" data-s="trasporti" onclick="sezione('trasporti')">Costi di trasporto</div>
     <div class="sec todo" data-s="imballi" onclick="sezione('imballi')">Imballi</div>
     <div class="sec todo" data-s="finanziari" onclick="sezione('finanziari')">Costi finanziari</div>
     <div class="sec todo" data-s="resi" onclick="sezione('resi')">Resi da clienti</div>
@@ -1984,7 +2088,25 @@ PAGINA = r"""<!DOCTYPE html>
     <section id="sec-commerciali" class="sez-main" style="display:none"><h2 class="grp">Costi commerciali</h2>
       <div class="panel"><p class="muted">🔧 In costruzione — provvigioni e costi variabili di vendita (MdC II): estrazione, attribuzione alla riga, certificazione.</p></div></section>
     <section id="sec-trasporti" class="sez-main" style="display:none"><h2 class="grp">Costi di trasporto</h2>
-      <div class="panel"><p class="muted">🔧 In costruzione — costi di trasporto (MdC III). Funzione dedicata: <strong>gestione fatture vettori</strong> (DB <code>trasporti</code>, <code>KB_FattureVettori…</code>) con <strong>riconciliazione</strong> spedizioni/fatture.</p></div></section>
+      <div class="panel">
+        <p class="muted">Costo di spedizione <strong>reale</strong> (fatturato dai vettori). Si carica il riepilogativo
+        delle spedizioni e si imputa a ogni vendita: il costo di ogni spedizione segue il suo <strong>ordine</strong> fino
+        al <strong>documento</strong>, e si ripartisce sulle righe in proporzione al valore. Entra nel <strong>Margine di Contribuzione III</strong>.</p>
+        <div class="solo-validazione" style="margin:10px 0;padding:10px;border:1px dashed var(--line);border-radius:8px">
+          <strong>🔧 Caricamento riepilogativo vettori</strong>
+          <p class="muted" style="margin:4px 0 8px">File CSV o Excel scaricato da Google Sheet (colonne: Trasportatore, Anno, Mese, Tipo Spedizione, N. rif. Cliente, Nolo, Spese Accessorie, Totale…).</p>
+          <input type="file" id="traspFile" accept=".csv,.xlsx,.xls">
+          <button onclick="trasportoImporta()">Carica nel datawarehouse</button>
+          <button onclick="trasportoElabora()" title="Ricostruisce il legame ordine→documento e propaga il costo ai margini">Elabora e imputa ai margini</button>
+          <span id="traspMsg" class="muted"></span>
+        </div>
+        <div id="traspRic"></div>
+      </div>
+      <div class="panel">
+        <h2>Stima per fascia di peso <span class="muted" style="font-weight:400">(livello 1 — usata finché non arriva la fattura del vettore)</span></h2>
+        <p class="muted">Costo di una spedizione per <strong>canale</strong>, <strong>area</strong> (Italia/Estero) e <strong>fascia di peso</strong> (kg). Si applica al documento e si ripartisce sulle righe per valore. <code>*</code> = qualsiasi; vince la regola più specifica. La <strong>data di validità</strong> permette di aggiornare i valori senza cambiare i periodi già chiusi.</p>
+        <div id="traspCfg"></div>
+      </div></section>
     <section id="sec-imballi" class="sez-main" style="display:none"><h2 class="grp">Imballi</h2>
       <div class="panel"><p class="muted">🔧 In costruzione — costi di imballaggio attribuibili.</p></div></section>
     <section id="sec-finanziari" class="sez-main" style="display:none"><h2 class="grp">Costi finanziari</h2>
@@ -2072,6 +2194,7 @@ function onPeriodo(){ SEL=null; cerca();
   if(SEZ==='ce') caricaCE();
   if(SEZ==='materiali'){ aggiornaStatoMese(); caricaSub(); }
   if(SEZ==='riconc') caricaRiconc();
+  if(SEZ==='trasporti') caricaTrasporti();
   if(SEZ==='wap') sottoWap(SUBW);
 }
 function sezione(s){
@@ -2082,6 +2205,7 @@ function sezione(s){
   else if(s==='ricavi') cerca();
   else if(s==='materiali'){ aggiornaStatoMese(); sottoVista(SUBV); }
   else if(s==='riconc') caricaRiconc();
+  else if(s==='trasporti') caricaTrasporti();
   else if(s==='wap') sottoWap(SUBW);
   else if(s==='sql') caricaSql();
 }
@@ -2250,6 +2374,110 @@ async function consolidaMese(riapri){
   await fetch('/api/consolida_mese',{method:'POST',headers:{'Content-Type':'application/json'},
      body:JSON.stringify(riapri?{anno:a,mese:m,riapri:1}:{anno:a,mese:m})});
   aggiornaStatoMese();
+}
+
+// ---- TRASPORTI -------------------------------------------------------------
+async function trasportoImporta(){
+  const inp=$("#traspFile"); const msg=$("#traspMsg");
+  if(!inp.files.length){ msg.textContent='Scegli prima un file.'; return; }
+  msg.textContent='Caricamento in corso…';
+  const fd=new FormData(); fd.append('file', inp.files[0]);
+  try{
+    const r=await fetch('/api/trasporto_importa',{method:'POST',body:fd});
+    const d=await r.json();
+    if(!d.ok){ msg.textContent='Errore: '+(d.errore||'sconosciuto'); return; }
+    msg.textContent=d.messaggio+' Periodi: '+(d.periodi||[]).join(', ')+'.';
+    caricaTrasporti();
+  }catch(e){ msg.textContent='Errore: '+e; }
+}
+async function trasportoElabora(){
+  const {a}=periodo(); const msg=$("#traspMsg");
+  msg.textContent='Elaborazione (legame ordine→documento + imputazione)… può richiedere qualche minuto.';
+  try{
+    const r=await fetch('/api/trasporto_elabora',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({anno:a})});
+    const d=await r.json();
+    msg.textContent=d.ok?('Fatto. Mesi aggiornati: '+(d.mesi||[]).join(', ')+'.'):'Errore elaborazione.';
+    caricaTrasporti();
+  }catch(e){ msg.textContent='Errore: '+e; }
+}
+async function caricaTrasporti(){
+  const {a,m}=periodo(); const box=$("#traspRic"); if(!box) return;
+  const d=await j(`/api/trasporto_riconciliazione?anno=${a}&mese=${m}`);
+  const s=d.sintesi||{}, imp=d.imputato||{};
+  if(!s.totale){ box.innerHTML=`<p class="muted">Nessuna spedizione caricata per ${a}-${String(m).padStart(2,'0')}. Carica il riepilogativo vettori qui sopra.</p>`; return; }
+  const rows=[
+    ['Imputato al venduto (entra nel margine)', s.agganciato, 'Spedizioni agganciate al documento di vendita tramite il numero ordine: il costo è ripartito sulle righe.'],
+    ['Ordine non ancora fatturato', s.ordine_non_fatturato, 'Spedizione collegata a un ordine che però non risulta ancora fatturato: nessun documento su cui imputare.'],
+    ['Riferimento non riconosciuto', s.rif_non_riconosciuto, 'Il riferimento sulla spedizione non corrisponde ad alcun ordine di vendita (riferimento mancante o errato nel file).'],
+    ['Rientri / resi (voce separata)', s.rientri, 'Ritiri e rientri dai vettori: logistica dei resi, tenuta a parte per non alterare il margine della singola vendita.'],
+  ];
+  const tot=Number(s.totale)||0;
+  let h=`<h2 class="grp" style="margin-top:14px">Dove è finito il costo dei vettori — spedizioni di ${a}-${String(m).padStart(2,'0')}</h2>`;
+  h+=`<div class="banner ok" style="font-size:13.5px;margin-bottom:10px">Costo vettori del mese <strong>${eur(tot)}</strong> su <strong>${num(s.n_spedizioni)}</strong> spedizioni. Ogni euro è classificato qui sotto (i totali tornano).</div>`;
+  h+=`<div class="panel"><table><thead><tr><th>Voce</th><th class="num">Importo</th><th class="num">%</th><th>Perché</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ const v=Number(r[1])||0; const pct=tot?(100*v/tot):0;
+    h+=`<tr><td>${r[0]}</td><td class="num">${eur(v)}</td><td class="num">${pct.toFixed(1)}%</td><td class="muted">${r[2]}</td></tr>`; });
+  h+=`<tr style="font-weight:700;border-top:2px solid var(--line);background:#faf8f2"><td>Totale</td><td class="num">${eur(tot)}</td><td class="num">100,0%</td><td></td></tr>`;
+  h+=`</tbody></table></div>`;
+  h+=`<p class="muted">Imputato a MdC III per i documenti di questo mese: <strong>${eur(imp.importo)}</strong> su ${num(imp.righe)} righe. <span class="solo-validazione">🔧 Nota: l'imputato segue il mese del DOCUMENTO (la spedizione può precedere/seguire la fattura di qualche giorno), quindi può differire dall'agganciato del mese di spedizione finché non sono caricati tutti i mesi.</span></p>`;
+  if((d.vettori||[]).length){
+    h+=`<div class="panel"><h2>Per vettore</h2><table><thead><tr><th>Vettore</th><th class="num">Spedizioni</th><th class="num">Costo</th></tr></thead><tbody>`;
+    d.vettori.forEach(v=>{ h+=`<tr><td>${esc(v.vettore)}</td><td class="num">${num(v.n)}</td><td class="num">${eur(v.tot)}</td></tr>`; });
+    h+=`</tbody></table></div>`;
+  }
+  box.innerHTML=h;
+  caricaTrasportoCfg();
+}
+let _traspCanali=[];
+async function caricaTrasportoCfg(){
+  const box=$("#traspCfg"); if(!box) return;
+  const d=await j('/api/trasporto_config'); _traspCanali=d.canali||[];
+  const r=d.regole||[];
+  let h=`<table><thead><tr><th>Canale</th><th>Area</th><th class="num">Peso da (kg)</th><th class="num">Peso a (kg)</th><th class="num">Costo €</th><th>Valido dal</th><th>Note</th><th></th></tr></thead><tbody>`;
+  r.forEach(x=>{
+    h+=`<tr>
+      <td>${esc(x.canale)}</td><td>${esc(x.area)}</td>
+      <td class="num">${num(x.peso_da_kg)}</td><td class="num">${num(x.peso_a_kg)}</td>
+      <td class="num">${eur(x.costo_eur)}</td><td>${esc(x.valido_dal)}</td><td>${esc(x.note||'')}</td>
+      <td><button onclick='traspCfgEdit(${JSON.stringify(x)})'>✎</button>
+          <button onclick='traspCfgElimina(${x.id})'>🗑</button></td></tr>`;
+  });
+  if(!r.length) h+=`<tr><td colspan="8" class="muted">Nessuna regola: aggiungine una qui sotto.</td></tr>`;
+  h+=`</tbody></table>`;
+  const canOpts=['*'].concat(_traspCanali).map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  h+=`<div style="margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px">
+    <strong id="traspCfgTit">Nuova regola</strong>
+    <input type="hidden" id="cfgId" value="0">
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin-top:6px">
+      <label>Canale<br><select id="cfgCanale">${canOpts}</select></label>
+      <label>Area<br><select id="cfgArea"><option>*</option><option>ITALIA</option><option>ESTERO</option></select></label>
+      <label>Peso da (kg)<br><input id="cfgPda" type="number" step="0.001" value="0" style="width:90px"></label>
+      <label>Peso a (kg)<br><input id="cfgPa" type="number" step="0.001" value="0" style="width:90px"></label>
+      <label>Costo €<br><input id="cfgCosto" type="number" step="0.01" value="0" style="width:90px"></label>
+      <label>Valido dal<br><input id="cfgDal" type="date" value="2026-01-01"></label>
+      <label>Note<br><input id="cfgNote" type="text" style="width:160px"></label>
+      <button onclick="traspCfgSalva()">Salva</button>
+      <button onclick="traspCfgReset()">Pulisci</button>
+    </div></div>`;
+  box.innerHTML=h;
+}
+function traspCfgReset(){ $("#cfgId").value='0'; $("#traspCfgTit").textContent='Nuova regola';
+  $("#cfgCanale").value='*'; $("#cfgArea").value='*'; $("#cfgPda").value='0'; $("#cfgPa").value='0';
+  $("#cfgCosto").value='0'; $("#cfgDal").value='2026-01-01'; $("#cfgNote").value=''; }
+function traspCfgEdit(x){ $("#cfgId").value=x.id; $("#traspCfgTit").textContent='Modifica regola #'+x.id;
+  $("#cfgCanale").value=x.canale; $("#cfgArea").value=x.area; $("#cfgPda").value=x.peso_da_kg;
+  $("#cfgPa").value=x.peso_a_kg; $("#cfgCosto").value=x.costo_eur; $("#cfgDal").value=x.valido_dal; $("#cfgNote").value=x.note||''; }
+async function traspCfgSalva(){
+  const body={id:+$("#cfgId").value, canale:$("#cfgCanale").value, area:$("#cfgArea").value,
+    peso_da_kg:+$("#cfgPda").value, peso_a_kg:+$("#cfgPa").value, costo_eur:+$("#cfgCosto").value,
+    valido_dal:$("#cfgDal").value, note:$("#cfgNote").value};
+  if(body.peso_a_kg<=body.peso_da_kg){ alert('La fascia di peso non è valida: "peso a" deve essere maggiore di "peso da".'); return; }
+  await fetch('/api/trasporto_config_salva',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  traspCfgReset(); caricaTrasportoCfg();
+}
+async function traspCfgElimina(id){ if(!confirm('Eliminare la regola #'+id+'?')) return;
+  await fetch('/api/trasporto_config_elimina',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  caricaTrasportoCfg();
 }
 function sottoVista(v){
   SUBV=v;

@@ -37,10 +37,14 @@ def main():
     dwh = db.engine_dwh(config)
     db.esegui_script(dwh, ROOT / "sql/ddl/01_struttura.sql")
     db.esegui_script(dwh, ROOT / "sql/ddl/02_seed_componenti.sql")
+    db.esegui_script(dwh, ROOT / "sql/ddl/03_struttura_trasporti.sql")
 
     # --- 2) (ri)crea tutte le procedure e viste (idempotente) -----------------
     print("[2/5] Creo/aggiorno procedure e viste")
     db.esegui_script(dwh, ROOT / "sql/extract/10_usp_load_src.sql")
+    # supporto al componente TRASPORTO: ponte ordine->documento e vista peso/area/canale
+    db.esegui_script(dwh, ROOT / "sql/verifiche/ordine_documento.sql")
+    db.esegui_script(dwh, ROOT / "sql/verifiche/doc_trasporto.sql")
     # tutte le procedure di componente in sql/components/ (ordine per nome file)
     for f in sorted((ROOT / "sql/components").glob("*.sql")):
         db.esegui_script(dwh, f)
