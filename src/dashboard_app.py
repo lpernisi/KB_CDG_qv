@@ -1184,16 +1184,22 @@ def api_raccordo_proposte():
     anno, mda, ma = _ric_periodo()
     ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
     rows = righe("""
-        SELECT rp.MovEntryId, ISNULL(cs.CompanyName, rp.CustSupp) AS cliente,
-               CONVERT(varchar(10), rp.MovDate, 103) AS spedito, mh.DocNo AS ddt,
+        SELECT rp.MovEntryId, ISNULL(cs.CompanyName, rp.CustSupp) AS cliente_sped, rp.CustSupp AS cliente_sped_cod,
+               CONVERT(varchar(10), rp.MovDate, 103) AS spedito, mh.DocNo AS ddt, vl.InternalOrdNo AS ordine,
                rp.FatturaId, sd.DocNo AS fattura, CONVERT(varchar(10), rp.FatturaDate, 103) AS data_fattura,
-               sd.DocumentType AS tipo_fatt, rp.GgDiff AS giorni, rp.ArtComuni AS art_comuni,
-               rp.NumCandidati AS candidati, rp.Stato,
+               ISNULL(csf.CompanyName, sd.CustSupp) AS cliente_fatt, sd.CustSupp AS cliente_fatt_cod,
+               rp.GgDiff AS giorni, rp.ArtComuni AS art_comuni, rp.NumCandidati AS candidati, rp.Stato,
+               (SELECT STRING_AGG(z.Item, ', ') FROM (SELECT DISTINCT LTRIM(RTRIM(d.Item)) AS Item
+                    FROM KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d WHERE d.EntryId = rp.MovEntryId) z) AS art_sped,
+               (SELECT STRING_AGG(z.Item, ', ') FROM (SELECT DISTINCT LTRIM(RTRIM(dd.Item)) AS Item
+                    FROM KODICEBAGNO_4.dbo.MA_SaleDocDetail dd WHERE dd.SaleDocId = rp.FatturaId) z) AS art_fatt,
                ROW_NUMBER() OVER (PARTITION BY rp.MovEntryId ORDER BY rp.GgDiff, rp.ArtComuni DESC) AS rank_best
         FROM kodice.raccordo_proposto rp
         JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = rp.FatturaId
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries mh ON mh.EntryId = rp.MovEntryId
+        LEFT JOIN kodice.vendite_link vl ON vl.MovEntryId = rp.MovEntryId
         LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = rp.CustSupp
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp csf ON csf.CustSupp = sd.CustSupp
         WHERE rp.Anno = :a AND rp.MovDate >= :ini AND rp.MovDate < :fin1
         ORDER BY rp.NumCandidati DESC, rp.MovEntryId, rp.GgDiff, rp.ArtComuni DESC""", a=anno, ini=ini, fin1=fin1)
     return jsonify(rows)
@@ -1811,14 +1817,22 @@ async function caricaRaccordo(){
     const badge = st==='CONFERMATO'?'<span style="color:#2f7d52;font-weight:700">✓ confermato</span>'
                 : st==='RIFIUTATO'?'<span style="color:#b00;font-weight:700">✗ rifiutato</span>'
                 : (h0.candidati>1?`<span style="color:#e0a800;font-weight:700">${h0.candidati} candidati</span>`:'');
-    h+=`<div style="border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:8px">
-        <div style="font-size:13px"><strong>${esc(h0.cliente||'')}</strong> · spedito ${h0.spedito} · DDT ${esc(h0.ddt||'-')} ${badge}</div>
-        <table style="margin-top:6px"><tbody>`;
+    h+=`<div style="border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:10px">
+        <div style="font-size:12.5px;background:#f3f1ea;padding:5px 7px;border-radius:4px">
+           <strong>SPEDIZIONE</strong> · ordine ${esc(h0.ordine||'-')} · DDT ${esc(h0.ddt||'-')} · ${h0.spedito}
+           &nbsp; cliente <strong>${esc(h0.cliente_sped||'')}</strong> (${esc(h0.cliente_sped_cod||'')}) ${badge}
+           <br><span class="muted">articoli:</span> ${esc(h0.art_sped||'-')}</div>
+        <table style="margin-top:6px;width:100%"><tbody>`;
     c.forEach(r=>{
       const sel = (r.rank_best===1 && st!=='CONFERMATO') || (st==='CONFERMATO' && r.Stato==='CONFERMATO');
-      h+=`<tr><td style="width:24px"><input type="radio" name="rc_${mv}" value="${r.FatturaId}" ${sel?'checked':''} ${st==='CONFERMATO'?'disabled':''}></td>
-          <td>fattura <strong>${esc(r.fattura||'')}</strong> del ${r.data_fattura}</td>
-          <td class="num">${r.giorni} gg</td><td class="num">${r.art_comuni} art.</td></tr>`;
+      const stessoCliente = (r.cliente_fatt_cod===h0.cliente_sped_cod);
+      h+=`<tr style="border-top:1px solid var(--line)"><td style="width:24px;vertical-align:top;padding-top:6px">
+            <input type="radio" name="rc_${mv}" value="${r.FatturaId}" ${sel?'checked':''} ${st==='CONFERMATO'?'disabled':''}></td>
+          <td style="padding:4px 0">
+            <strong>FATTURA ${esc(r.fattura||'')}</strong> del ${r.data_fattura}
+            &nbsp; cliente ${stessoCliente?'✓ stesso':'⚠ DIVERSO'} <strong>${esc(r.cliente_fatt||'')}</strong> (${esc(r.cliente_fatt_cod||'')})
+            &nbsp; <span class="muted">${r.giorni}gg · ${r.art_comuni} art. in comune</span>
+            <br><span class="muted">articoli:</span> ${esc(r.art_fatt||'-')}</td></tr>`;
     });
     h+=`</tbody></table>`;
     if(st==='PROPOSTO')
