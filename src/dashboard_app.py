@@ -819,6 +819,17 @@ def api_riconciliazione_cogs():
         """, a=anno, d=mda, h=ma)[0]
     imb_iniz = fn(imb["ini"]); imb_fin = fn(imb["fin"]); imb_carico = fn(imb["carico"])
     rin_b = rin_b - imb_iniz; rfin_b = rfin_b - imb_fin       # rimanenze contabili SOLO PRODOTTI
+    # RICONCILIAZIONE IMBALLAGGI col conto costo 06021505 (AccrualDate): GL = nostro carico magazzino
+    # + imballaggi spesati DIRETTI in prima nota (CRRefType<>27066402, mai a magazzino)
+    # + residuo fatture vs carico (righe imballaggio senza codice articolo). Identita' esatta dal lato GL.
+    imbgl = righe("""SELECT
+        ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) tot,
+        ISNULL(SUM(CASE WHEN je.CRRefType<>27066402 THEN (CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) ELSE 0 END),0) diretti
+        FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+        WHERE g.Account='06021505' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]
+    imb_gl = fn(imbgl["tot"]); imb_diretti = fn(imbgl["diretti"])
+    imb_residuo = imb_gl - imb_diretti - imb_carico          # fatture imballaggi − nostro carico (righe senza codice)
     # Scomposizione della "competenza acquisti" (gl_acq − acq) in voci parlanti (vedi _ric_acq), SOLO PRODOTTI:
     acq_oneri = fn(righe("""SELECT SUM(w.ValAcqOneri) v FROM kodice.wap_ricalc w
         LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item
@@ -902,7 +913,8 @@ def api_riconciliazione_cogs():
                     "nostro": {"acquisti_carico": r(acq), "rim_iniz": r(rin_n), "rim_fin": r(rfin_n),
                                "var_rim": r(rin_n - rfin_n)},
                     "imballaggi": {"rim_iniz": r(imb_iniz), "rim_fin": r(imb_fin), "carico": r(imb_carico),
-                                   "var_rim": r(imb_iniz - imb_fin)},
+                                   "var_rim": r(imb_iniz - imb_fin), "gl": r(imb_gl), "diretti": r(imb_diretti),
+                                   "residuo": r(imb_residuo)},
                     "ord_non_spediti": ord_ns})
 
 
@@ -1127,6 +1139,38 @@ def api_riconciliazione_drill():
             WHERE s.Anno=:a AND s.MovDate>=:ini AND s.MovDate<:fin1
             ORDER BY ABS(s.Delta) DESC""", a=anno, ini=ini, fin1=fin1)
         return jsonify(_con_resto(rows, tot))
+    if k == "imb_diretti":
+        # Imballaggi spesati DIRETTI in prima nota (06021505, CRRefType<>27066402): mai passati da magazzino.
+        # Elenco documenti (competenza/registrazione/importo) — la worklist da valutare in Mago.
+        return jsonify(righe("""SELECT je.DocNo AS documento,
+                CONVERT(varchar(10),CAST(g.AccrualDate AS date),103) AS competenza,
+                CONVERT(varchar(10),CAST(g.PostingDate AS date),103) AS registrato,
+                ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS valore
+            FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+            JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+            WHERE g.Account='06021505' AND je.CRRefType<>27066402
+              AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+            GROUP BY je.DocNo, CAST(g.AccrualDate AS date), CAST(g.PostingDate AS date)
+            ORDER BY ABS(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END)) DESC""", a=anno, d=mda, h=ma))
+    if k == "imb_senzacodice":
+        # INDICATIVO (non quadra all'euro col residuo: legame riga->conto non univoco). Righe SENZA codice articolo
+        # sulle fatture d'acquisto che toccano 06021505: imballi acquistati che non entrano a magazzino -> costo puro.
+        # E' la worklist da correggere in Mago (codificare le righe-merce cosi' entrano in giacenza).
+        return jsonify(righe("""
+            WITH fattids AS (SELECT DISTINCT je.CRRefID AS pid
+                FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+                JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+                WHERE g.Account='06021505' AND je.CRRefType=27066402
+                  AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h)
+            SELECT TOP 200 pd.DocNo AS documento, ISNULL(cs.CompanyName, pd.Supplier) AS fornitore,
+                   LEFT(d.Description,50) AS descrizione, ROUND(SUM(d.TaxableAmount),2) AS valore
+            FROM fattids f
+            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDocDetail d ON d.PurchaseDocId=f.pid
+            JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=f.pid
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=pd.Supplier
+            WHERE LTRIM(RTRIM(ISNULL(d.Item,'')))=''
+            GROUP BY pd.DocNo, ISNULL(cs.CompanyName, pd.Supplier), LEFT(d.Description,50)
+            ORDER BY SUM(d.TaxableAmount) DESC""", a=anno, d=mda, h=ma))
     if k == "apert":
         # articoli con maggior scostamento di valore d'apertura nostro vs ultimo costo Mago (proxy del drift)
         return jsonify(righe("""SELECT TOP 300 w.Item, ROUND(w.QtaIniz,0) AS giacenza,
@@ -1819,14 +1863,27 @@ async function caricaRiconc(){
       <div class="banner ok" style="margin-top:10px;font-size:12.5px">Ponte <strong>prodotti-contro-prodotti</strong>: gli imballaggi (ItemType 997) sono esclusi da carico, rimanenze e COGS. Ogni scarto è una <strong>riga spiegata</strong>; validazione implicita del costo del venduto.</div>
       </div></div>`;
   h+=`<div class="panel" style="margin-top:14px">
-      <h2>Imballaggi — traccia separata (esclusi dal COGS prodotti)</h2>
-      <p class="muted">Gli imballaggi entrano a magazzino col carico ma in contabilità sono <strong>costo</strong> (conto 06021505), non merce. Tenuti fuori dalla riconciliazione del costo del venduto. Valori dal nostro ricalcolo (il bilancio non separa il conto rimanenze).</p>
+      <h2>Imballaggi — traccia separata + riconciliazione contabile</h2>
+      <p class="muted">Gli imballaggi entrano a magazzino col carico ma in contabilità sono <strong>costo</strong> (conto 06021505), non merce. Tenuti fuori dalla riconciliazione del costo del venduto prodotti. Rimanenze dal nostro ricalcolo (il bilancio non separa il conto rimanenze).</p>
       <table><tbody>
       <tr><td>Rimanenze iniziali imballaggi</td><td class="num">${eur(imb.rim_iniz)}</td></tr>
       <tr><td>Rimanenze finali imballaggi</td><td class="num">${eur(imb.rim_fin)}</td></tr>
       <tr><td>Carico imballaggi nel periodo</td><td class="num">${eur(imb.carico)}</td></tr>
       <tr style="font-weight:700;border-top:2px solid var(--line)"><td>Consumo imballaggi (Δrim + carico)</td><td class="num">${eur((imb.rim_iniz||0)-(imb.rim_fin||0)+(imb.carico||0))}</td></tr>
-      </tbody></table></div>`;
+      </tbody></table>
+      <h3 style="margin-top:16px">Riconciliazione col conto costo imballaggi (06021505)</h3>
+      <p class="muted">Quanto del costo imballaggi a contabilità passa dal nostro magazzino e quanto no. Identità esatta dal lato contabile.</p>
+      <table><tbody>
+      <tr><td>= Nostro carico a magazzino (imballaggi entrati in giacenza)</td><td class="num">${eur(imb.carico)}</td></tr>
+      <tr><td>+ Spesati DIRETTI in prima nota (mai a magazzino) &nbsp;<a href="#" onclick="ricDrill('imb_diretti');return false">▸ documenti</a></td><td class="num">${eur(imb.diretti)}</td></tr>
+      <tr><td>+ Righe imballaggio SENZA codice articolo su fatture (residuo) &nbsp;<a href="#" onclick="ricDrill('imb_senzacodice');return false">▸ documenti (stima)</a></td><td class="num">${eur(imb.residuo)}</td></tr>
+      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>= Costo imballaggi a CONTABILITÀ (GL 06021505)</td><td class="num">${eur(imb.gl)}</td></tr>
+      </tbody></table>
+      <div id="ricdet_imb_diretti" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_imb_diretti"></div></div>
+      <div id="ricdet_imb_senzacodice" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_imb_senzacodice"></div></div>
+      <div class="banner" style="margin-top:10px;font-size:12px;background:#fbf6e7;border:1px solid #e0c97a;padding:8px 10px;border-radius:6px">
+        <strong>${eur((imb.diretti||0)+(imb.residuo||0))}</strong> di imballaggi NON passano dal magazzino → diventano <strong>costo puro</strong>. Non toccano il COGS prodotti (06021505 è fuori dai conti materiale), ma se quella merce è ancora in <strong>giacenza</strong> andrebbe capitalizzata (↑ rimanenze finali, ↓ costo) = potenziale <strong>recupero a bilancio</strong>. Correzione lato Mago: codificare le righe-merce così entrano in giacenza. NB: il drill "senza codice" è una <em>stima</em> (legame riga→conto non univoco); i "Conai/contributi" sono costo per natura, non recuperabili.</div>
+      </div>`;
   h+=`<div class="panel" style="margin-top:14px">
       <h2>Ordini fatturati non ancora spediti alla chiusura</h2>
       <p class="muted">Competenza al periodo (mesi 1–${m}/${a}): <strong>${(d.ord_non_spediti||0).toLocaleString('it-IT')}</strong> ordini con <strong>fattura</strong> emessa (COGS registrato) ma merce non ancora uscita dal magazzino al ${m}/${a}. Per competenza include anche gli ordini spediti <em>dopo</em> la chiusura; esclude gli ordini non ancora fatturati (tipicamente B2B aperti). Fonte: <code>VwKLStatoOrdini</code> (<code>CompletamenteConsegnato='No'</code> + spediti post-chiusura). <a href="#" onclick="ricDrill('ordnonsped');return false">▸ elenco documenti</a></p>
