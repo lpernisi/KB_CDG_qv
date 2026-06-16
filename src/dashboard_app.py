@@ -870,7 +870,8 @@ def api_riconciliazione_cogs():
         {"k": "glnodoc", "label": "± Registrazioni a conto materiale SENZA documento (giroconti contabili: es. \"merci in transito\")", "val": r(ab["glnodoc"]), "drill": True},
         {"k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (GL dazi/trasporti import − nostro carico) — da approfondire", "val": r(oneri_contrib), "drill": True},
         {"k": "ricnf_prec", "label": "− Acquisti: merce ricevuta nel periodo, fattura registrata in periodo precedente (cross-anno reale dic→gen)", "val": r(-ab["prec"]), "drill": True},
-        {"k": "uscita_ddt", "label": "+ Merce uscita NON in COGS: B2C cross-anno (ricevuta dic, spedita gen) + B2B fattura differita / ordini annullati", "val": r(sped_ap + sped_res), "drill": True},
+        {"k": "uscita_prec", "label": "+ Spedito nel periodo ma FATTURATO PRIMA (fattura/ricevuta di periodo precedente, B2C cross-anno)", "val": r(sped_ap), "drill": True},
+        {"k": "uscita_diff", "label": "+ Spedito su DDT/ordine, fattura DIFFERITA o non emessa (B2B) / senza ordine collegato", "val": r(sped_res), "drill": True},
     ]
     spiegato = cogs + sum(c["val"] for c in comp)
     non_giust = consumo_bil - spiegato                     # NON forzato a zero: e' il vero scarto non spiegato
@@ -1111,25 +1112,26 @@ def api_riconciliazione_drill():
                    v.NrRighe AS righe, v.QtaOrdinata AS qta_ordinata,
                    CASE WHEN v.CompletamenteConsegnato = 'No' THEN 'backlog' ELSE 'spedito dopo chiusura' END AS stato
             """ + _ORD_NON_SPEDITI_FROM + " ORDER BY v.DataOrdine DESC", fine=_fine_periodo(anno, ma)))
-    if k == "uscita_ddt":
-        # DETTAGLIO DOCUMENTO PER DOCUMENTO (DDT, ordine, cliente, data, fattura agganciata, valore):
-        # cosi' si possono aprire in Mago e verificare uno per uno. Top 300 + residuo (somma alla riga).
+    if k in ("uscita_prec", "uscita_diff"):
+        # DETTAGLIO DOCUMENTO PER DOCUMENTO. Due viste distinte:
+        #  uscita_prec = spedito nel periodo ma FATTURATO PRIMA (FatturaDate < inizio periodo);
+        #  uscita_diff = spedito su DDT/ordine con fattura DIFFERITA/non emessa (Modo SOLO_ORDINE/NESSUN_ORDINE).
         ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
-        tot = fn(righe("""SELECT ISNULL(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),0) v
-            FROM kodice.vendite_link vl
+        cond = ("vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini"
+                if k == "uscita_prec" else "vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE')")
+        base = """ FROM kodice.vendite_link vl
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=vl.MovEntryId
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(vl.MovDate)
             LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
             WHERE vl.MovDate>=:ini AND vl.MovDate<:fin1 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
-              AND vl.InternalOrdNo NOT LIKE '1300%'
-              AND ((vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini)
-                   OR vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE'))""", a=anno, ini=ini, fin1=fin1)[0]["v"])
+              AND vl.InternalOrdNo NOT LIKE '1300%' AND (""" + cond + ")"
+        tot = fn(righe("SELECT ISNULL(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),0) v" + base, a=anno, ini=ini, fin1=fin1)[0]["v"])
         rows = righe("""
             SELECT TOP 300 CONVERT(varchar(10),vl.MovDate,103) AS spedito, mh.DocNo AS ddt,
                    vl.InternalOrdNo AS ordine, ISNULL(cs.CompanyName, mh.CustSupp) AS cliente,
                    fd.DocNo AS fattura, CONVERT(varchar(10),vl.FatturaDate,103) AS data_fattura,
                    CASE WHEN vl.Modo='NESSUN_ORDINE' THEN 'senza ordine'
-                        WHEN vl.Modo='SOLO_ORDINE' THEN 'fattura non agganciata (B2B differita o link mancato)'
+                        WHEN vl.Modo='SOLO_ORDINE' THEN 'fattura differita o link non trovato'
                         ELSE 'fatturato in periodo precedente' END AS tipo,
                    ROUND(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),2) AS valore
             FROM kodice.vendite_link vl
@@ -1140,9 +1142,7 @@ def api_riconciliazione_drill():
             LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
             LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=mh.CustSupp
             WHERE vl.MovDate>=:ini AND vl.MovDate<:fin1 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
-              AND vl.InternalOrdNo NOT LIKE '1300%'
-              AND ((vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini)
-                   OR vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE'))
+              AND vl.InternalOrdNo NOT LIKE '1300%' AND (""" + cond + """)
             GROUP BY vl.MovDate, mh.DocNo, vl.InternalOrdNo, ISNULL(cs.CompanyName, mh.CustSupp), fd.DocNo, vl.FatturaDate, vl.Modo
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, ini=ini, fin1=fin1)
         return jsonify(_con_resto(rows, tot))
