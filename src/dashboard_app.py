@@ -859,6 +859,10 @@ def api_riconciliazione_cogs():
         LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
         WHERE rp.Anno=:a AND rp.Stato='CONFERMATO' AND rp.MovDate>=:ini AND rp.MovDate<:fin1
           AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, ini=_ini, fin1=_fin1)[0]["v"])
+    # Sostituzioni in spedizione (articolo scaricato != fatturato): il COGS valorizza l'originario (riga fattura),
+    # l'inventario scarica il sostitutivo. Delta = valore spedito - valore fatturato (kit esplosi), gia' materializzato.
+    sost_delta = fn(righe("""SELECT ISNULL(SUM(Delta),0) v FROM kodice.sostituzione_spedizione
+        WHERE Anno=:a AND MovDate>=:ini AND MovDate<:fin1""", a=anno, ini=_ini, fin1=_fin1)[0]["v"])
     r = lambda x: round(x, 2)
     # NESSUN PLUG: ogni componente e' MISURATA da fonte. Il ponte NON e' forzato a zero: cio' che le componenti
     # misurate non spiegano resta una riga esplicita "DIFFERENZA NON GIUSTIFICATA" (= Y − X − Σcomponenti), che
@@ -874,6 +878,7 @@ def api_riconciliazione_cogs():
         {"k": "rettneg", "label": "+ Rettifiche/consumi non-vendita (perdite, inventari di fine mese)", "val": r(rett_n), "drill": True},
         {"k": "rettpos", "label": "− Rettifiche positive (rientri / aumenti d'inventario)", "val": r(-rett_p), "drill": True},
         {"k": "fba", "label": "± Trasferimenti FBA Amazon (sbilancio gambe ATRI↔Amazon)", "val": r(-trasf_fba), "drill": True},
+        {"k": "sost_sped", "label": "± Sostituzioni in spedizione (articolo scaricato ≠ fatturato, kit esplosi)", "val": r(sost_delta), "drill": True},
         {"k": "ricnf_nofatt", "label": "+ Ricevuto NON fatturato: bolle fornitore ancora da fatturare (nessuna fattura)", "val": r(-ab["nofatt"]), "drill": True},
         # -- media certezza: chiare ma da verificare --
         {"k": "ricnf_dopo", "label": "+ Ricevuto e fatturato DOPO il periodo (fatture fornitori di giugno+) — da verificare", "val": r(-ab["dopo"]), "drill": True},
@@ -1105,6 +1110,23 @@ def api_riconciliazione_drill():
             ORDER BY g.AccrualDate DESC, ABS(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END)) DESC""",
             a=anno, d=mda, h=ma)
         return jsonify(rows)
+    if k == "sost_sped":
+        # SOSTITUZIONI IN SPEDIZIONE, documento per documento: fattura/cliente, articoli ORIGINARI (ordinati, in
+        # fattura, kit esplosi) vs SOSTITUTIVI (spediti al loro posto), col delta di costo (spedito − fatturato).
+        # Legge la tabella materializzata kodice.sostituzione_spedizione (veloce). TOP 300 + residuo = riga esatta.
+        ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
+        tot = fn(righe("""SELECT ISNULL(SUM(Delta),0) v FROM kodice.sostituzione_spedizione
+            WHERE Anno=:a AND MovDate>=:ini AND MovDate<:fin1""", a=anno, ini=ini, fin1=fin1)[0]["v"])
+        rows = righe("""SELECT TOP 300 sd.DocNo AS fattura, CONVERT(varchar(10),s.MovDate,103) AS spedito,
+                   ISNULL(cs.CompanyName, s.CustSupp) AS cliente,
+                   s.ArtOriginari AS originari_fatturati, s.ArtSostitutivi AS sostitutivi_spediti,
+                   ROUND(s.Delta,2) AS valore
+            FROM kodice.sostituzione_spedizione s
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId=s.FatturaId
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=s.CustSupp
+            WHERE s.Anno=:a AND s.MovDate>=:ini AND s.MovDate<:fin1
+            ORDER BY ABS(s.Delta) DESC""", a=anno, ini=ini, fin1=fin1)
+        return jsonify(_con_resto(rows, tot))
     if k == "apert":
         # articoli con maggior scostamento di valore d'apertura nostro vs ultimo costo Mago (proxy del drift)
         return jsonify(righe("""SELECT TOP 300 w.Item, ROUND(w.QtaIniz,0) AS giacenza,

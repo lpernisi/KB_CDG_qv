@@ -339,3 +339,89 @@ BEGIN
     WHERE rp.Anno = @Anno;
 END
 GO
+
+-- =============================================================================
+-- kodice.sostituzione_spedizione — SOSTITUZIONI IN SPEDIZIONE: il cliente ordina un
+-- prodotto (resta in fattura, e quindi nel COGS) ma ne viene spedito un ALTRO (scarico
+-- di magazzino). COGS valorizza l'originario, l'inventario scarica il sostitutivo:
+-- e' una differenza reale di costo, oggi annegata nel "non giustificato".
+-- Confronto fra ARTICOLI SCARICATI (movimento 506) e ARTICOLI FATTURATI (fattura agganciata),
+-- ESPLODENDO i kit fatturati (vw_distinta) ed escludendo imballaggi e codici di servizio.
+-- Sostituzione = esiste >=1 prodotto spedito non fatturato E >=1 prodotto fatturato non spedito.
+-- Delta = valore spedito - valore fatturato (al WAPCost_ricalc del mese, stessa base del ponte).
+-- =============================================================================
+IF OBJECT_ID('kodice.sostituzione_spedizione', 'U') IS NOT NULL DROP TABLE kodice.sostituzione_spedizione;
+GO
+CREATE TABLE kodice.sostituzione_spedizione (
+    Anno           smallint NOT NULL,
+    MovEntryId     int      NOT NULL,
+    FatturaId      int      NULL,
+    CustSupp       varchar(20)  NULL,
+    MovDate        date     NULL,
+    ValSpedito     float    NULL,        -- valore PRODOTTI scaricati (WAPCost_ricalc del mese)
+    ValFatturato   float    NULL,        -- valore PRODOTTI fatturati (kit esplosi), stessa base
+    Delta          float    NULL,        -- ValSpedito - ValFatturato (>0 = sostitutivo costa di piu')
+    ArtOriginari   nvarchar(2000) NULL,  -- prodotti fatturati NON spediti (gli originari ordinati)
+    ArtSostitutivi nvarchar(2000) NULL,  -- prodotti spediti NON fatturati (i sostitutivi)
+    CONSTRAINT PK_sostituzione_spedizione PRIMARY KEY (MovEntryId)
+);
+GO
+CREATE OR ALTER PROCEDURE kodice.usp_build_sostituzione_spedizione
+    @Anno smallint
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DELETE FROM kodice.sostituzione_spedizione WHERE Anno = @Anno;
+
+    ;WITH lk AS (   -- movimenti di scarico con fattura agganciata
+        SELECT vl.MovEntryId, vl.FatturaId, vl.MovDate
+        FROM kodice.vendite_link vl
+        WHERE vl.FatturaId IS NOT NULL AND YEAR(vl.MovDate) = @Anno),
+    esc AS (SELECT Item FROM kodice.articoli_esclusi_costo),
+    sped AS (       -- PRODOTTI spediti (no imballaggi, no servizi)
+        SELECT lk.MovEntryId, LTRIM(RTRIM(d.Item)) Item, SUM(ABS(d.Qty)) Qty
+        FROM lk JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId = lk.MovEntryId
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item = LTRIM(RTRIM(d.Item))
+        WHERE ISNULL(ca.Classe,'PRODOTTO') = 'PRODOTTO' AND LTRIM(RTRIM(d.Item)) NOT IN (SELECT Item FROM esc)
+        GROUP BY lk.MovEntryId, LTRIM(RTRIM(d.Item))),
+    fattexp AS (    -- PRODOTTI fatturati ESPLODENDO i kit (no imballaggi, no servizi)
+        SELECT lk.MovEntryId, ix.Item, SUM(ix.Qty) Qty
+        FROM lk JOIN KODICEBAGNO_4.dbo.MA_SaleDocDetail bd ON bd.SaleDocId = lk.FatturaId
+        CROSS APPLY (
+            SELECT LTRIM(RTRIM(dd.Component)) Item, dd.Qty*ABS(bd.Qty) Qty
+              FROM kodice.vw_distinta dd WHERE LTRIM(RTRIM(dd.BOM)) = LTRIM(RTRIM(bd.Item))
+            UNION ALL
+            SELECT LTRIM(RTRIM(bd.Item)), ABS(bd.Qty)
+              WHERE NOT EXISTS (SELECT 1 FROM kodice.vw_distinta dd WHERE LTRIM(RTRIM(dd.BOM)) = LTRIM(RTRIM(bd.Item)))
+        ) ix
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item = ix.Item
+        WHERE ISNULL(ca.Classe,'PRODOTTO') = 'PRODOTTO' AND ix.Item NOT IN (SELECT Item FROM esc)
+        GROUP BY lk.MovEntryId, ix.Item),
+    allid AS (SELECT MovEntryId, Item FROM sped UNION SELECT MovEntryId, Item FROM fattexp),
+    val AS (        -- per articolo: qta spedita/fatturata e costo al WAPCost_ricalc del mese
+        SELECT a.MovEntryId, a.Item, lk.FatturaId, lk.MovDate,
+               ISNULL(s.Qty,0) QtaSped, ISNULL(f.Qty,0) QtaFatt, ISNULL(wr.WAPCost_ricalc,0) costo
+        FROM allid a
+        JOIN lk ON lk.MovEntryId = a.MovEntryId
+        LEFT JOIN sped s ON s.MovEntryId = a.MovEntryId AND s.Item = a.Item
+        LEFT JOIN fattexp f ON f.MovEntryId = a.MovEntryId AND f.Item = a.Item
+        LEFT JOIN kodice.wap_ricalc wr ON wr.Item = a.Item AND wr.Anno = YEAR(lk.MovDate) AND wr.Mese = MONTH(lk.MovDate)),
+    agg AS (
+        SELECT MovEntryId, MIN(FatturaId) FatturaId, MIN(MovDate) MovDate,
+               SUM(QtaSped*costo) ValSpedito, SUM(QtaFatt*costo) ValFatturato,
+               SUM((QtaSped-QtaFatt)*costo) Delta,
+               SUM(CASE WHEN QtaSped>0 AND QtaFatt=0 THEN 1 ELSE 0 END) ProdSoloSped,
+               SUM(CASE WHEN QtaFatt>0 AND QtaSped=0 THEN 1 ELSE 0 END) ProdSoloFatt,
+               STRING_AGG(CASE WHEN QtaFatt>0 AND QtaSped=0 THEN Item END, ', ') ArtOriginari,
+               STRING_AGG(CASE WHEN QtaSped>0 AND QtaFatt=0 THEN Item END, ', ') ArtSostitutivi
+        FROM val GROUP BY MovEntryId)
+    INSERT INTO kodice.sostituzione_spedizione
+        (Anno, MovEntryId, FatturaId, CustSupp, MovDate, ValSpedito, ValFatturato, Delta, ArtOriginari, ArtSostitutivi)
+    SELECT @Anno, a.MovEntryId, a.FatturaId, h.CustSupp, a.MovDate, a.ValSpedito, a.ValFatturato, a.Delta,
+           a.ArtOriginari, a.ArtSostitutivi
+    FROM agg a
+    JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId = a.MovEntryId
+    WHERE a.ProdSoloSped > 0 AND a.ProdSoloFatt > 0      -- SOLO sostituzioni vere (swap sui due lati)
+    OPTION (MAXDOP 1);
+END
+GO
