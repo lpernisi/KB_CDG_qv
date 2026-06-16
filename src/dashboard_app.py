@@ -914,29 +914,47 @@ def api_riconciliazione_cogs():
     # poi quelle ancora da verificare, infine quelle inaffidabili da link/da dettagliare).
     comp = [
         # -- alta certezza: validate e comprese --
-        {"k": "rim_iniz", "label": "+ Differenza di valore delle rimanenze a INIZIO periodo (contabilità − magazzino)", "val": r(rin_b - rin_n), "drill": False},
-        {"k": "rim_fin", "label": "+ Differenza di valore delle rimanenze a FINE periodo (magazzino − contabilità)", "val": r(rfin_n - rfin_b), "drill": False},
-        {"k": "resi", "label": "− Resi da clienti (merce rientrata, in contabilità non è un costo)", "val": r(-resi), "drill": True},
-        {"k": "rettneg", "label": "+ Cali, perdite e rettifiche d'inventario (consumi non da vendita)", "val": r(rett_n), "drill": True},
-        {"k": "rettpos", "label": "− Rettifiche positive d'inventario (rientri / aumenti)", "val": r(-rett_p), "drill": True},
-        {"k": "fba", "label": "± Merce trasferita al magazzino Amazon (FBA): invii non ancora bilanciati", "val": r(-trasf_fba), "drill": True},
-        {"k": "sost_sped", "label": "± Sostituzioni in spedizione (al cliente è stato spedito un prodotto diverso da quello fatturato)", "val": r(sost_delta), "drill": True},
-        {"k": "ricnf_nofatt", "label": "+ Merce ricevuta dai fornitori ma non ancora fatturata", "val": r(-ab["nofatt"]), "drill": True},
+        {"k": "rim_iniz", "label": "+ Differenza di valore delle rimanenze a INIZIO periodo (contabilità − magazzino)", "val": r(rin_b - rin_n), "drill": False,
+         "perche": "Se la contabilità valorizza le rimanenze iniziali più del nostro magazzino, quel maggior valore di apertura diventa maggior consumo a bilancio: si aggiunge per rendere confrontabili i due conteggi."},
+        {"k": "rim_fin", "label": "+ Differenza di valore delle rimanenze a FINE periodo (magazzino − contabilità)", "val": r(rfin_n - rfin_b), "drill": False,
+         "perche": "Se le nostre rimanenze finali sono più alte di quelle contabili, a bilancio (che chiude con rimanenze più basse) il consumo risulta maggiore: la differenza si aggiunge."},
+        {"k": "resi", "label": "− Resi da clienti (merce rientrata, in contabilità non è un costo)", "val": r(-resi), "drill": True,
+         "perche": "I resi sono merce rientrata dai clienti: a bilancio aumentano le rimanenze finali e quindi RIDUCONO il consumo. Nel nostro costo del venduto non hanno un documento di vendita, perciò li SOTTRAIAMO per allinearci al bilancio."},
+        {"k": "rettneg", "label": "+ Cali, perdite e rettifiche d'inventario (consumi non da vendita)", "val": r(rett_n), "drill": True,
+         "perche": "Cali, perdite e rettifiche tolgono merce dal magazzino SENZA una vendita: a bilancio sono consumo, ma non entrano nel costo del venduto abbinato al fatturato. Si AGGIUNGONO."},
+        {"k": "rettpos", "label": "− Rettifiche positive d'inventario (rientri / aumenti)", "val": r(-rett_p), "drill": True,
+         "perche": "Le rettifiche positive rimettono merce a magazzino (aumentano le rimanenze finali): a bilancio riducono il consumo. Si SOTTRAGGONO."},
+        {"k": "fba", "label": "± Merce trasferita al magazzino Amazon (FBA): invii non ancora bilanciati", "val": r(-trasf_fba), "drill": True,
+         "perche": "Gli invii al magazzino Amazon (FBA) sono spostamenti tra depositi, NON vendite. Se l'uscita dal nostro magazzino e il carico su Amazon non coincidono nel periodo, lo sbilancio altera il consumo e va corretto."},
+        {"k": "sost_sped", "label": "± Sostituzioni in spedizione (al cliente è stato spedito un prodotto diverso da quello fatturato)", "val": r(sost_delta), "drill": True,
+         "perche": "Quando spediamo un prodotto diverso da quello fatturato, il costo del venduto valorizza l'articolo FATTURATO mentre il magazzino scarica quello SPEDITO: la differenza di costo riallinea i due mondi."},
+        {"k": "ricnf_nofatt", "label": "+ Merce ricevuta dai fornitori ma non ancora fatturata", "val": r(-ab["nofatt"]), "drill": True,
+         "perche": "Merce già ricevuta e a magazzino, ma la fattura del fornitore non è ancora arrivata: il costo non è ancora in contabilità. Si riallinea la competenza tra magazzino e bilancio."},
         # -- media certezza: chiare ma da verificare --
-        {"k": "ricnf_dopo", "label": "+ Merce ricevuta nel periodo, fatturata dal fornitore nei mesi successivi — da verificare", "val": r(-ab["dopo"]), "drill": True},
-        {"k": "glnodoc", "label": "± Scritture contabili sul conto materiali senza documento (giroconti, es. merci in transito)", "val": r(ab["glnodoc"]), "drill": True},
-        {"k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (dazi, trasporti d'importazione): in contabilità rispetto a magazzino — da approfondire", "val": r(oneri_contrib), "drill": True},
-        {"k": "ricnf_prec", "label": "− Merce ricevuta nel periodo ma già fatturata nel periodo precedente (a cavallo d'anno)", "val": r(-ab["prec"]), "drill": True},
-        {"k": "uscita_prec", "label": "+ Merce spedita nel periodo ma fatturata prima (vendita a cavallo di periodo)", "val": r(sped_ap), "drill": True},
-        {"k": "uscita_diff", "label": "+ Merce spedita su bolla/ordine con fattura differita o non ancora emessa, o senza ordine collegato", "val": r(sped_res), "drill": True},
+        {"k": "ricnf_dopo", "label": "+ Merce ricevuta nel periodo, fatturata dal fornitore nei mesi successivi — da verificare", "val": r(-ab["dopo"]), "drill": True,
+         "perche": "Merce ricevuta nel periodo ma fatturata dal fornitore nei mesi dopo: il costo arriverà in contabilità più avanti. Si riallinea la competenza del costo d'acquisto."},
+        {"k": "glnodoc", "label": "± Scritture contabili sul conto materiali senza documento (giroconti, es. merci in transito)", "val": r(ab["glnodoc"]), "drill": True,
+         "perche": "Scritture sul conto materiali senza un documento di acquisto/vendita collegato (giroconti, merci in transito): esistono in contabilità ma non hanno corrispondenza nei nostri documenti."},
+        {"k": "ricnf_oneri", "label": "± Oneri accessori d'acquisto (dazi, trasporti d'importazione): in contabilità rispetto a magazzino — da approfondire", "val": r(oneri_contrib), "drill": True,
+         "perche": "Dazi e trasporti d'importazione registrati in contabilità sul costo merci: vanno confrontati con quanto abbiamo caricato a magazzino sul costo della merce, perché spesso entrano in tempi diversi."},
+        {"k": "ricnf_prec", "label": "− Merce ricevuta nel periodo ma già fatturata nel periodo precedente (a cavallo d'anno)", "val": r(-ab["prec"]), "drill": True,
+         "perche": "Merce ricevuta in questo periodo ma con fattura d'acquisto già registrata prima: quel costo è stato contato nel periodo precedente, quindi qui si TOGLIE per non contarlo due volte."},
+        {"k": "uscita_prec", "label": "+ Merce spedita nel periodo ma fatturata prima (vendita a cavallo di periodo)", "val": r(sped_ap), "drill": True,
+         "perche": "Merce uscita dal magazzino in questo periodo ma fatturata prima: il suo costo del venduto è finito nel periodo precedente. Si AGGIUNGE qui per competenza fisica."},
+        {"k": "uscita_diff", "label": "+ Merce spedita su bolla/ordine con fattura differita o non ancora emessa, o senza ordine collegato", "val": r(sped_res), "drill": True,
+         "perche": "Merce uscita dal magazzino con fattura differita o non ancora emessa: il costo del venduto non l'ha ancora abbinata al fatturato, ma la merce è già uscita. Si AGGIUNGE."},
     ]
     spiegato = cogs + sum(c["val"] for c in comp)
     non_giust = consumo_bil - spiegato                     # NON forzato a zero: e' il vero scarto non spiegato
-    righe_out = ([{"n": 1, "k": "cogs", "label": "Costo del venduto (dal nostro calcolo, abbinato al fatturato — incluse le sostituzioni gratuite)", "val": r(cogs), "tot": True, "drill": True}]
+    righe_out = ([{"n": 1, "k": "cogs", "label": "Costo del venduto (dal nostro calcolo, abbinato al fatturato — incluse le sostituzioni gratuite)", "val": r(cogs), "tot": True, "drill": True,
+                   "perche": "Punto di partenza: il costo del venduto che calcoliamo noi, abbinato ai documenti di vendita del periodo. Da qui aggiungiamo o togliamo le voci sotto per arrivare al consumo di materie del bilancio."}]
                  + [dict(c, n=i + 2) for i, c in enumerate(comp)]
-                 + [{"n": len(comp) + 2, "k": "spiegato", "label": "= Totale spiegato (costo del venduto + le voci qui sopra)", "val": r(spiegato), "tot": True},
-                    {"n": len(comp) + 3, "k": "non_giust", "label": "≠ DIFFERENZA ANCORA DA SPIEGARE (scarto reale tra i due mondi, da dettagliare)", "val": r(non_giust), "drill": False},
-                    {"n": len(comp) + 4, "k": "bilancio", "label": "= Consumo di materie a CONTABILITÀ (acquisti ± variazione delle rimanenze)", "val": r(consumo_bil), "tot": True}])
+                 + [{"n": len(comp) + 2, "k": "spiegato", "label": "= Totale spiegato (costo del venduto + le voci qui sopra)", "val": r(spiegato), "tot": True,
+                     "perche": "Costo del venduto più tutte le voci di riconciliazione: è quanto riusciamo a spiegare. Quanto più si avvicina al consumo a bilancio, tanto più la quadratura è completa."},
+                    {"n": len(comp) + 3, "k": "non_giust", "label": "≠ DIFFERENZA ANCORA DA SPIEGARE (scarto reale tra i due mondi, da dettagliare)", "val": r(non_giust), "drill": False,
+                     "perche": "Ciò che le voci misurate non spiegano: lo scarto reale ancora da dettagliare, tipicamente differenze di valorizzazione del costo (nostro calcolo rispetto al costo a bilancio)."},
+                    {"n": len(comp) + 4, "k": "bilancio", "label": "= Consumo di materie a CONTABILITÀ (acquisti ± variazione delle rimanenze)", "val": r(consumo_bil), "tot": True,
+                     "perche": "Il consumo di materie come risulta dal bilancio: acquisti del periodo più o meno la variazione delle rimanenze. È il bersaglio con cui confrontiamo il nostro costo del venduto."}])
     ord_ns = righe("SELECT COUNT(*) n " + _ORD_NON_SPEDITI_FROM, fine=_fine_periodo(anno, ma))[0]["n"]
     return jsonify({"anno": anno, "mese_da": mda, "mese_a": ma, "righe": righe_out,
                     "contabile": {"acquisti": r(gl_acq), "rim_iniz": r(rin_b), "rim_fin": r(rfin_b),
@@ -1804,6 +1822,7 @@ PAGINA = r"""<!DOCTYPE html>
   .grp{font-family:Georgia,serif;font-size:16px;margin:20px 0 8px}
   .badge{font-size:11px;color:var(--muted);font-weight:400;margin-left:8px;text-transform:uppercase}
   tr.drill{cursor:pointer} tr.drill:hover{background:#efeae0}
+  .info{cursor:help;color:#9a8f78;font-size:12px;margin-left:3px;border-bottom:1px dotted #c7bfa8}
   tr.det>td{background:#faf8f2;padding:0;border-bottom:2px solid var(--line)}
   .dbox{padding:10px 14px}
   details.sez{background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:12px;overflow:hidden}
@@ -2007,8 +2026,9 @@ async function caricaRiconc(){
   h+=`<div class="panel"><h2>Da COGS (X) a Consumo contabile (Y)</h2><table><tbody>`;
   (d.righe||[]).forEach(x=>{
     const tot=x.tot?'font-weight:700;border-top:2px solid var(--line);background:#faf8f2':'';
+    const info=x.perche?`<span class="info" title="${esc(x.perche)}">ⓘ</span>`:'';
     h+=`<tr class="${x.drill?'drill':''}" style="${tot}" ${x.drill?`onclick="ricDrill('${x.k}')"`:''}>
-        <td>${x.drill?'<span class="muted">▸</span> ':'&nbsp;&nbsp;'}${esc(x.label)}</td>
+        <td>${x.drill?'<span class="muted">▸</span> ':'&nbsp;&nbsp;'}${esc(x.label)} ${info}</td>
         <td class="num">${eur(x.val)}</td></tr>
         <tr class="det" id="ricdet_${x.k}" style="display:none"><td colspan="2"><div class="dbox" id="ricbox_${x.k}"></div></td></tr>`;
   });
