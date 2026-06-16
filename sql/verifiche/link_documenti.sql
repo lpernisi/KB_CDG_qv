@@ -14,7 +14,9 @@
 --   1 DIRETTO    : CrossReferences a 1 salto  fattura(Origin) -> movimento(Derived)
 --   2 DDT_2SALTI : CrossReferences a 2 salti   fattura -> DDT -> movimento (fattura differita B2B)
 --   3 VIA_ORDINE : movimento -> ordine (CrossRef/OrderId), ordine -> fattura (InternalOrdNo=SaleDocId B2C / CrossRef)
--- Tipi fattura vendita: 3407878 / 3407874 / 3407876. Cliente 70209 (AMAZON LOGISTICA) ESCLUSO (trasferimento FBA).
+-- Tipi fattura vendita: 3407878 / 3407874 (SOLO vendite in uscita). Le NOTE DI CREDITO 3407876 sono ESCLUSE: sono
+-- resi/storni (rientro merce), non si agganciano a uno scarico 506 (uscita) -> falserebbero spedito/sostituzioni.
+-- Cliente 70209 (AMAZON LOGISTICA) ESCLUSO (trasferimento FBA).
 -- =============================================================================
 USE CDG_QV;
 GO
@@ -65,7 +67,7 @@ BEGIN
                sd.DocumentType AS FatturaType, 0 AS prio
         FROM mov
         JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.DocNo = mov.DocNo AND sd.CustSupp = mov.CustSupp
-             AND sd.DocumentType IN (3407878,3407874,3407876) AND YEAR(sd.DocumentDate) = @Anno
+             AND sd.DocumentType IN (3407878,3407874) AND YEAR(sd.DocumentDate) = @Anno
     ),
     -- GAMBA SEMPRE PRESENTE: movimento -> ordine cliente, in 2 modi (priorita': CrossRef, poi OrderId sul dettaglio).
     -- VALIDAZIONE: il CLIENTE dell'ordine deve combaciare col cliente del movimento (uccide i link spuri del grafo
@@ -96,7 +98,7 @@ BEGIN
                sd.DocumentType AS FatturaType, 1 AS prio  -- B2C
         FROM ordine ord
         JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON CAST(sd.SaleDocId AS varchar(21)) = ord.InternalOrdNo
-             AND sd.DocumentType IN (3407878,3407874,3407876)
+             AND sd.DocumentType IN (3407878,3407874)
              AND (sd.CustSupp = ord.Customer OR sd.CustSupp = ord.InvoicingCustomer)        UNION ALL
         SELECT ord.EntryId, sd.SaleDocId, CAST(sd.DocumentDate AS date), sd.DocumentType, 2  -- AMAZON (1 salto)
         FROM ordine ord
@@ -104,7 +106,7 @@ BEGIN
         -- (escluso 27066370 "Movimento Magazzino" generico e altri tipi contabili: pescavano fatture sbagliate/vecchie.)
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences xf ON xf.OriginDocID = ord.SaleOrdId
              AND xf.DerivedDocType IN (27066387,27066391,27066389)
-        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = xf.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)
+        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = xf.DerivedDocID AND sd.DocumentType IN (3407878,3407874)
              AND (sd.CustSupp = ord.Customer OR sd.CustSupp = ord.InvoicingCustomer)        UNION ALL
         SELECT ord.EntryId, sd.SaleDocId, CAST(sd.DocumentDate AS date), sd.DocumentType, 3  -- B2B via DDT (2 salti)
         FROM ordine ord
@@ -112,7 +114,7 @@ BEGIN
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x1 ON x1.OriginDocID = ord.SaleOrdId AND x1.DerivedDocType = 27066383
         JOIN KODICEBAGNO_4.dbo.MA_CrossReferences x2 ON x2.OriginDocID = x1.DerivedDocID
              AND x2.DerivedDocType IN (27066387,27066391,27066389)
-        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = x2.DerivedDocID AND sd.DocumentType IN (3407878,3407874,3407876)
+        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = x2.DerivedDocID AND sd.DocumentType IN (3407878,3407874)
              AND (sd.CustSupp = ord.Customer OR sd.CustSupp = ord.InvoicingCustomer)    ),
     -- scelta UNICA per movimento: priorita' (0 DocNo diretto, 1 B2C, 2 Amazon, 3 B2B), poi fattura piu' vicina
     -- alla data del MOVIMENTO; tetto 180 gg (no link spuri). Riferimento data = movimento (vale anche senza ordine).
@@ -295,7 +297,7 @@ BEGIN
         FROM KODICEBAGNO_4.dbo.MA_SaleDoc sd
         LEFT JOIN (SELECT DISTINCT FatturaId FROM kodice.vendite_link WHERE FatturaId IS NOT NULL) v
                ON v.FatturaId = sd.SaleDocId
-        WHERE sd.DocumentType IN ('3407874','3407878','3407876') AND v.FatturaId IS NULL
+        WHERE sd.DocumentType IN ('3407874','3407878') AND v.FatturaId IS NULL   -- no note di credito (resi)
           AND sd.DocumentDate >= @binf AND sd.DocumentDate < @bsup
           AND sd.CustSupp NOT IN ('KODICEFR','KODICEDE','KODICEES')),
     ov AS (        -- coppie FORTI: stesso cliente, |data|<=90, >=1 articolo in comune.
@@ -373,10 +375,12 @@ BEGIN
     SET NOCOUNT ON;
     DELETE FROM kodice.sostituzione_spedizione WHERE Anno = @Anno;
 
-    ;WITH lk AS (   -- movimenti di scarico con fattura agganciata
+    ;WITH lk AS (   -- movimenti di scarico con FATTURA DI VENDITA agganciata.
+                    -- ESCLUSE le note di credito (3407876): sono resi/storni, non vendite in uscita -> il confronto
+                    -- "scaricato vs fatturato" non ha senso (lo scarico 506 e' merce IN USCITA, la NC e' un rientro).
         SELECT vl.MovEntryId, vl.FatturaId, vl.MovDate
         FROM kodice.vendite_link vl
-        WHERE vl.FatturaId IS NOT NULL AND YEAR(vl.MovDate) = @Anno),
+        WHERE vl.FatturaId IS NOT NULL AND vl.FatturaType IN (3407874,3407878) AND YEAR(vl.MovDate) = @Anno),
     esc AS (SELECT Item FROM kodice.articoli_esclusi_costo),
     sped AS (       -- PRODOTTI spediti (no imballaggi, no servizi)
         SELECT lk.MovEntryId, LTRIM(RTRIM(d.Item)) Item, SUM(ABS(d.Qty)) Qty
