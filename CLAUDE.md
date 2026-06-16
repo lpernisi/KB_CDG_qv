@@ -21,6 +21,11 @@
 > - **Mai un dump**: tabelle ordinate e raggruppate in modo che la lettura racconti una storia.
 > - **Test**: se una riga non si capisce senza spiegazione tecnica, è SBAGLIATA → va riscritta.
 >   Prima di esporre qualcosa, chiediti: "lo capirebbe il CEO da solo?".
+> - **In pagina SOLO le cose utili.** Ciò che serve solo a NOI in questa fase di debug/validazione va
+>   marcato esplicitamente con la classe CSS **`solo-validazione`** (+ un badge `🔧`): è visibile solo
+>   in **"Modalità validazione"** (interruttore nell'header) e SPARISCE nella **vista pulita (CEO)**.
+>   Quando un calcolo è validato, il suo strumento di supporto si nasconde, lasciando pagine pulite.
+>   Default attuale: modalità validazione ON (siamo in validazione); si spegne quando consegnamo al CEO.
 
 ## Obiettivo
 

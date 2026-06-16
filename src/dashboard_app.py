@@ -1357,7 +1357,7 @@ def api_riconciliazione_imb_forn():
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
         JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='IMBALLAGGIO'
         WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND h.CancelPhase1='0' AND h.CancelPhase2='0'
-          AND h.CustSupp=:cod AND YEAR(h.PostingDate)=:a
+          AND h.CustSupp=:cod AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
         GROUP BY h.EntryId),
       mov2b AS (SELECT DISTINCT x.DerivedDocID AS entryid, x.OriginDocID AS bollaid
                 FROM KODICEBAGNO_4.dbo.MA_CrossReferences x WHERE x.DerivedDocType=27066370),
@@ -1401,18 +1401,36 @@ def api_riconciliazione_imb_forn():
         Z = fn(x["costo_registrato"])
         out.append(riga(x["documento"], x["nr_fornitore"], x["data"], 0.0, Z,
                         "messa a costo diretto in prima nota (mai passata da magazzino)"))
-    # carico del fornitore NON agganciato ad alcuna fattura del periodo (sfasamento competenza / fattura su altro conto)
-    C_tot = fn(righe("""SELECT ISNULL(SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END),0) C
-        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
-        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
-        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='IMBALLAGGIO'
-        WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND h.CancelPhase1='0' AND h.CancelPhase2='0'
-          AND h.CustSupp=:cod AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""",
-        a=anno, d=mda, h=ma, cod=cod)[0]["C"])
-    orfano = r(C_tot - sum(fn(x["caricato_magazzino"]) for x in fatt))
-    if abs(orfano) >= 0.01:
-        out.append(riga("merce a magazzino non ancora fatturata", None, None, orfano, 0.0,
-                        "carico ricevuto nel periodo ma fattura non ancora registrata"))
+    # carico del fornitore NON agganciato ad alcuna fattura del periodo: lo esplodo nei SINGOLI MOVIMENTI di carico,
+    # ognuno col suo numero documento e data (cercabile in Mago) — niente più una riga-totale senza riferimento.
+    orf = righe("""
+      WITH pf AS (SELECT DISTINCT je.CRRefID AS fattid
+            FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+            JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+            WHERE g.Account='06021505' AND je.CRRefType=27066402
+              AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+              AND EXISTS (SELECT 1 FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g2
+                  WHERE g2.JournalEntryId=g.JournalEntryId AND g2.Account LIKE '0502%' AND g2.CustSupp=:cod)),
+      cm AS (SELECT h.EntryId, MAX(h.DocNo) AS DocNo, MIN(CAST(h.PostingDate AS date)) AS dt,
+                SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END) AS val
+             FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+             JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='IMBALLAGGIO'
+             WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND h.CancelPhase1='0' AND h.CancelPhase2='0'
+               AND h.CustSupp=:cod AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+             GROUP BY h.EntryId),
+      mov2b AS (SELECT DISTINCT x.DerivedDocID AS entryid, x.OriginDocID AS bollaid
+                FROM KODICEBAGNO_4.dbo.MA_CrossReferences x WHERE x.DerivedDocType=27066370),
+      b2f AS (SELECT DISTINCT x.DerivedDocID AS fattid, x.OriginDocID AS bollaid
+              FROM KODICEBAGNO_4.dbo.MA_CrossReferences x WHERE x.DerivedDocType=27066402),
+      tied AS (SELECT DISTINCT cm.EntryId FROM cm JOIN mov2b ON mov2b.entryid=cm.EntryId
+               JOIN b2f ON b2f.bollaid=mov2b.bollaid JOIN pf ON pf.fattid=b2f.fattid)
+      SELECT cm.DocNo AS documento, CONVERT(varchar(10),cm.dt,103) AS data, ROUND(cm.val,2) AS caricato
+      FROM cm WHERE cm.EntryId NOT IN (SELECT EntryId FROM tied) AND ABS(cm.val) > 0.005
+      ORDER BY cm.val DESC OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
+    for x in orf:
+        out.append(riga("carico " + str(x["documento"] or ""), None, x["data"], fn(x["caricato"]), 0.0,
+                        "merce caricata a magazzino ma fattura non ancora registrata (o fattura fuori periodo)"))
     out.sort(key=lambda x: -abs(fn(x["Differenza"])))
     out.append({"Documento": "TOTALE", "Nr. fornitore": None, "Data": None,
                 "Caricato a magazzino": r(sum(fn(x["Caricato a magazzino"]) for x in out)),
@@ -1823,6 +1841,12 @@ PAGINA = r"""<!DOCTYPE html>
   .badge{font-size:11px;color:var(--muted);font-weight:400;margin-left:8px;text-transform:uppercase}
   tr.drill{cursor:pointer} tr.drill:hover{background:#efeae0}
   .info{cursor:help;color:#9a8f78;font-size:12px;margin-left:3px;border-bottom:1px dotted #c7bfa8}
+  /* Strumenti di validazione/debug (solo per noi): visibili SOLO in "Modalità validazione", spariscono nella vista pulita (CEO) */
+  .solo-validazione{display:none}
+  body.valida .solo-validazione{display:revert}
+  body.valida tr.solo-validazione{display:table-row}
+  .valbadge{display:inline-block;font-size:10.5px;font-weight:700;color:#9a6b00;background:#fff3d6;border:1px solid #e0c97a;border-radius:4px;padding:1px 7px;margin-bottom:6px}
+  .valtoggle{font-size:12.5px;margin-left:16px;cursor:pointer;color:#555;user-select:none}
   tr.det>td{background:#faf8f2;padding:0;border-bottom:2px solid var(--line)}
   .dbox{padding:10px 14px}
   details.sez{background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:12px;overflow:hidden}
@@ -1838,6 +1862,7 @@ PAGINA = r"""<!DOCTYPE html>
 <header>
   <h1>CDG_QV · Esplora</h1>
   <label>Periodo <select id="periodo"></select></label>
+  <label class="valtoggle" title="Mostra gli strumenti di validazione/debug (per noi). A calcoli validati, deseleziona per la vista pulita da mostrare al CEO."><input type="checkbox" id="valToggle" onchange="toggleValida()"> 🔧 Modalità validazione</label>
 </header>
 <div class="app">
   <nav class="side">
@@ -1980,8 +2005,13 @@ function scanExport(){
 }
 let _scanT;
 function avviaExport(){ const o=new MutationObserver(()=>{ clearTimeout(_scanT); _scanT=setTimeout(scanExport,150); }); o.observe(document.body,{childList:true,subtree:true}); scanExport(); }
+// Modalità validazione: gli elementi marcati .solo-validazione (strumenti per noi) si vedono solo qui;
+// deselezionando si ottiene la "vista pulita" da CEO. Stato salvato nel browser.
+function toggleValida(){ const on=$("#valToggle").checked; document.body.classList.toggle('valida',on); try{localStorage.setItem('cdgValida',on?'1':'0')}catch(e){} }
+function initValida(){ let on=true; try{const v=localStorage.getItem('cdgValida'); if(v!==null) on=(v==='1');}catch(e){} const t=$("#valToggle"); if(t) t.checked=on; document.body.classList.toggle('valida',on); }
 
 async function init(){
+  initValida();
   const ps=await j("/api/periodi");
   const sel=$("#periodo");
   sel.innerHTML=ps.map(p=>`<option value="${p.anno}-${p.mese}">${p.anno}-${String(p.mese).padStart(2,'0')} · ${eur(p.ricavo)} · MdC I ${eur(p.mdc1)}</option>`).join("");
@@ -2034,7 +2064,7 @@ async function caricaRiconc(){
   });
   h+=`</tbody></table></div>`;
   const imb=d.imballaggi||{};
-  h+=`<div class="panel"><h2>Dati contabili (raffronto) — solo PRODOTTI</h2><table><tbody>
+  h+=`<div class="panel solo-validazione"><div class="valbadge">🔧 strumento di validazione</div><h2>Dati contabili (raffronto) — solo PRODOTTI</h2><table><tbody>
       <tr><td>Acquisti (GL 06011000 + oneri)</td><td class="num">${eur(co.acquisti)}</td></tr>
       <tr><td>+ Rimanenze iniziali (bilancio − imballaggi)</td><td class="num">${eur(co.rim_iniz)}</td></tr>
       <tr><td>− Rimanenze finali (bilancio − imballaggi)</td><td class="num">${eur(co.rim_fin)}</td></tr>
