@@ -1142,15 +1142,20 @@ def api_riconciliazione_drill():
     if k == "imb_diretti":
         # Imballaggi spesati DIRETTI in prima nota (06021505, CRRefType<>27066402): mai passati da magazzino.
         # Elenco documenti (competenza/registrazione/importo) — la worklist da valutare in Mago.
-        return jsonify(righe("""SELECT je.DocNo AS documento,
+        return jsonify(righe("""SELECT sup.fornitore AS fornitore, je.DocNo AS nr_doc_fornitore,
+                CONVERT(varchar(10),CAST(je.DocumentDate AS date),103) AS data_doc,
                 CONVERT(varchar(10),CAST(g.AccrualDate AS date),103) AS competenza,
-                CONVERT(varchar(10),CAST(g.PostingDate AS date),103) AS registrato,
                 ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS valore
             FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
             JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+            OUTER APPLY (SELECT TOP 1 ISNULL(cs.CompanyName, g2.CustSupp) AS fornitore
+                FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g2
+                LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=g2.CustSupp
+                WHERE g2.JournalEntryId=g.JournalEntryId AND g2.Account LIKE '0502%'
+                  AND LTRIM(RTRIM(ISNULL(g2.CustSupp,'')))<>'') sup
             WHERE g.Account='06021505' AND je.CRRefType<>27066402
               AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
-            GROUP BY je.DocNo, CAST(g.AccrualDate AS date), CAST(g.PostingDate AS date)
+            GROUP BY sup.fornitore, je.DocNo, CAST(je.DocumentDate AS date), CAST(g.AccrualDate AS date)
             ORDER BY ABS(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END)) DESC""", a=anno, d=mda, h=ma))
     if k == "imb_senzacodice":
         # INDICATIVO (non quadra all'euro col residuo: legame riga->conto non univoco). Righe SENZA codice articolo
@@ -1162,14 +1167,16 @@ def api_riconciliazione_drill():
                 JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
                 WHERE g.Account='06021505' AND je.CRRefType=27066402
                   AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h)
-            SELECT TOP 200 pd.DocNo AS documento, ISNULL(cs.CompanyName, pd.Supplier) AS fornitore,
+            SELECT TOP 200 ISNULL(cs.CompanyName, pd.Supplier) AS fornitore,
+                   pd.DocNo AS protocollo, NULLIF(pd.SupplierDocNo,'') AS nr_doc_fornitore,
                    LEFT(d.Description,50) AS descrizione, ROUND(SUM(d.TaxableAmount),2) AS valore
             FROM fattids f
             JOIN KODICEBAGNO_4.dbo.MA_PurchaseDocDetail d ON d.PurchaseDocId=f.pid
             JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=f.pid
             LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=pd.Supplier
             WHERE LTRIM(RTRIM(ISNULL(d.Item,'')))=''
-            GROUP BY pd.DocNo, ISNULL(cs.CompanyName, pd.Supplier), LEFT(d.Description,50)
+            GROUP BY ISNULL(cs.CompanyName, pd.Supplier), pd.DocNo, pd.SupplierDocNo, LEFT(d.Description,50)
+            HAVING ABS(SUM(d.TaxableAmount)) > 0.005
             ORDER BY SUM(d.TaxableAmount) DESC""", a=anno, d=mda, h=ma))
     if k == "apert":
         # articoli con maggior scostamento di valore d'apertura nostro vs ultimo costo Mago (proxy del drift)
