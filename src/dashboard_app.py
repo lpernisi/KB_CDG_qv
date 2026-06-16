@@ -2044,33 +2044,14 @@ async function caricaRiconc(){
       <div class="banner ok" style="margin-top:10px;font-size:12.5px">Ponte <strong>prodotti-contro-prodotti</strong>: gli imballaggi (ItemType 997) sono esclusi da carico, rimanenze e COGS. Ogni scarto è una <strong>riga spiegata</strong>; validazione implicita del costo del venduto.</div>
       </div></div>`;
   h+=`<div class="panel" style="margin-top:14px">
-      <h2>Imballaggi — traccia separata + riconciliazione contabile</h2>
-      <p class="muted">Gli imballaggi entrano a magazzino col carico ma in contabilità sono <strong>costo</strong> (conto 06021505), non merce. Tenuti fuori dalla riconciliazione del costo del venduto prodotti. Rimanenze dal nostro ricalcolo (il bilancio non separa il conto rimanenze).</p>
-      <table><tbody>
-      <tr><td>Rimanenze iniziali imballaggi</td><td class="num">${eur(imb.rim_iniz)}</td></tr>
-      <tr><td>Rimanenze finali imballaggi</td><td class="num">${eur(imb.rim_fin)}</td></tr>
-      <tr><td>Carico imballaggi nel periodo</td><td class="num">${eur(imb.carico)}</td></tr>
-      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>Consumo imballaggi (Δrim + carico)</td><td class="num">${eur((imb.rim_iniz||0)-(imb.rim_fin||0)+(imb.carico||0))}</td></tr>
-      </tbody></table>
-      <h3 style="margin-top:16px">Riconciliazione col conto costo imballaggi (06021505)</h3>
-      <p class="muted">Composizione del costo imballaggi a contabilità per origine. <strong>Identità esatta</strong>: ogni drill somma alla sua riga.</p>
-      <table><tbody>
-      <tr><td>Via fatture d'acquisto &nbsp;<a href="#" onclick="ricDrill('imb_viafatture');return false">▸ documenti</a></td><td class="num">${eur(imb.via_fatture)}</td></tr>
-      <tr><td>+ Spesati DIRETTI in prima nota (senza ciclo acquisti) &nbsp;<a href="#" onclick="ricDrill('imb_diretti');return false">▸ documenti</a></td><td class="num">${eur(imb.diretti)}</td></tr>
-      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>= Costo imballaggi a CONTABILITÀ (GL 06021505)</td><td class="num">${eur(imb.gl)}</td></tr>
-      </tbody></table>
-      <div id="ricdet_imb_viafatture" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_imb_viafatture"></div></div>
-      <div id="ricdet_imb_diretti" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_imb_diretti"></div></div>
-      <h3 style="margin-top:16px">Confronto contabilità ↔ magazzino, per FORNITORE (dove divergono)</h3>
-      <p class="muted">Stesso periodo sui due lati: i <strong>totali tornano</strong>. Ogni differenza è localizzata sul fornitore — clicca la riga per i <strong>documenti dei due mondi</strong> (contabilità vs magazzino) e capire dove nasce.</p>
-      <table><thead><tr><th>Fornitore</th><th class="num">Contabilità 06021505</th><th class="num">Magazzino (carico)</th><th class="num">Differenza</th></tr></thead><tbody>
-      ${(imb.match||[]).map((r,i)=>`<tr style="cursor:pointer" onclick="ricDrillForn('${esc(r.cod)}',${i})"><td>▸ ${esc(r.fornitore)}</td><td class="num">${eur(r.gl)}</td><td class="num">${eur(r.carico)}</td><td class="num" style="${Math.abs(r.diff||0)>0.005?'color:#b00;font-weight:600':'color:#2f7d52'}">${eur(r.diff)}</td></tr><tr><td colspan="4" style="padding:0"><div id="ricdet_forn_${i}" style="display:none;margin:4px 0"><div class="dbox" id="ricbox_forn_${i}"></div></div></td></tr>`).join('')}
+      <h2>Imballaggi — contabilità ↔ magazzino, per fornitore</h2>
+      <p class="muted">Gli imballaggi in contabilità sono un <strong>costo</strong> (non merce) e stanno fuori dal costo del venduto prodotti. Qui, <strong>per ogni fornitore</strong>, confrontiamo quanto è a costo in contabilità con quanto è davvero entrato a magazzino — stesso periodo, i <strong>totali tornano</strong>. <strong>Clicca un fornitore</strong> per vedere, documento per documento, dove nasce la differenza.</p>
+      <table><thead><tr><th>Fornitore</th><th class="num">Costo in contabilità</th><th class="num">Entrato a magazzino</th><th class="num">Differenza</th></tr></thead><tbody>
+      ${(imb.match||[]).map((r,i)=>`<tr class="drill" onclick="ricDrillForn('${esc(r.cod)}',${i})"><td>▸ ${esc(r.fornitore)}</td><td class="num">${eur(r.gl)}</td><td class="num">${eur(r.carico)}</td><td class="num" style="${Math.abs(r.diff||0)>0.005?'color:#b00;font-weight:600':'color:#2f7d52'}">${eur(r.diff)}</td></tr><tr><td colspan="4" style="padding:0"><div id="ricdet_forn_${i}" style="display:none;margin:4px 0"><div class="dbox" id="ricbox_forn_${i}"></div></div></td></tr>`).join('')}
       <tr style="font-weight:700;border-top:2px solid var(--line)"><td>TOTALE</td><td class="num">${eur((imb.match||[]).reduce((s,r)=>s+(r.gl||0),0))}</td><td class="num">${eur((imb.match||[]).reduce((s,r)=>s+(r.carico||0),0))}</td><td class="num">${eur((imb.match||[]).reduce((s,r)=>s+(r.diff||0),0))}</td></tr>
       </tbody></table>
       <div class="banner" style="margin-top:10px;font-size:12px;background:#fbf6e7;border:1px solid #e0c97a;padding:8px 10px;border-radius:6px">
-        La <strong>differenza</strong> = imballi messi a <strong>costo senza corrispondenza a magazzino</strong> (prima nota diretta + righe senza codice); se negativa = carico senza fattura su 06021505. Non tocca il COGS prodotti, ma se la merce è in <strong>giacenza</strong> va capitalizzata (↑ rimanenze, ↓ costo) = potenziale <strong>recupero a bilancio</strong>. Fix lato Mago: codificare le righe-merce.
-        <br>▸ <a href="#" onclick="ricDrill('imb_senzacodice');return false">worklist righe senza codice da correggere in Mago</a> <span class="muted">(Conai/contributi esclusi: costo per natura)</span></div>
-      <div id="ricdet_imb_senzacodice" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_imb_senzacodice"></div></div>
+        La <strong>differenza</strong> sono imballi a <strong>costo che non sono passati dal magazzino</strong> (fatture messe a costo diretto + righe senza codice articolo); se negativa, merce a magazzino non ancora fatturata. Se quella merce è ancora in <strong>giacenza</strong>, va capitalizzata (↑ rimanenze, ↓ costo) = potenziale <strong>recupero a bilancio</strong>. Correzione in Mago: codificare le righe-merce.</div>
       </div>`;
   h+=`<div class="panel" style="margin-top:14px">
       <h2>Ordini fatturati non ancora spediti alla chiusura</h2>
