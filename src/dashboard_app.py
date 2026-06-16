@@ -996,8 +996,11 @@ def api_riconciliazione_drill():
         # "residuo" che assorbe la coda troncata e gli arrotondamenti. Poi separa i segni: prima i −, poi i +.
         resto = round(fn(totale) - sum(fn(x.get("valore")) for x in rows), 2)
         if abs(resto) >= 0.005:
-            extra = {c: None for c in (rows[0].keys() if rows else ["Item", "valore"])}
-            extra["Item"] = "— residuo (coda troncata + arrotondamenti) —"
+            keys = list(rows[0].keys()) if rows else ["voce", "valore"]
+            extra = {c: None for c in keys}
+            # etichetta del residuo nella PRIMA colonna esistente (no colonna "Item" spuria su drill che non ce l'hanno)
+            labelkey = next((c for c in keys if c != "valore"), keys[0])
+            extra[labelkey] = "— residuo (coda troncata + arrotondamenti) —"
             extra["valore"] = resto
             rows = rows + [extra]
         for x in rows:                              # uniforma a float (evita Decimal->stringa in JSON)
