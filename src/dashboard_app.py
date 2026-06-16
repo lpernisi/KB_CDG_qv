@@ -1753,6 +1753,7 @@ function sezione(s){
 }
 async function caricaRiconc(){
   const {a,m}=periodo();
+  window._raccDirty=false;                  // totali ora freschi
   const d=await j(`/api/riconciliazione_cogs?anno=${a}&mese_da=1&mese_a=${m}`);
   window._ricP={a,m};
   const co=d.contabile||{}, no=d.nostro||{};
@@ -1810,39 +1811,46 @@ async function caricaRaccordo(){
   const grp={};
   d.forEach(r=>{ (grp[r.MovEntryId]=grp[r.MovEntryId]||[]).push(r); });
   const movs=Object.keys(grp);
-  const nMulti=movs.filter(k=>grp[k][0].candidati>1).length;
-  let h=`<p class="muted">${movs.length} spedizioni con proposta · ${nMulti} con più candidati (da scegliere).</p>`;
-  movs.forEach(mv=>{
-    const c=grp[mv], h0=c[0], st=h0.Stato;
-    const badge = st==='CONFERMATO'?'<span style="color:#2f7d52;font-weight:700">✓ confermato</span>'
-                : st==='RIFIUTATO'?'<span style="color:#b00;font-weight:700">✗ rifiutato</span>'
-                : (h0.candidati>1?`<span style="color:#e0a800;font-weight:700">${h0.candidati} candidati</span>`:'');
-    h+=`<div style="border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:10px">
-        <div style="font-size:12.5px;background:#f3f1ea;padding:5px 7px;border-radius:4px">
-           <strong>SPEDIZIONE</strong> · ordine ${esc(h0.ordine||'-')} · DDT ${esc(h0.ddt||'-')} · ${h0.spedito}
-           &nbsp; cliente <strong>${esc(h0.cliente_sped||'')}</strong> (${esc(h0.cliente_sped_cod||'')}) ${badge}
-           <br><span class="muted">articoli:</span> ${esc(h0.art_sped||'-')}</div>
-        <table style="margin-top:6px;width:100%"><tbody>`;
-    c.forEach(r=>{
-      const sel = (r.rank_best===1 && st!=='CONFERMATO') || (st==='CONFERMATO' && r.Stato==='CONFERMATO');
-      const stessoCliente = (r.cliente_fatt_cod===h0.cliente_sped_cod);
-      h+=`<tr style="border-top:1px solid var(--line)"><td style="width:24px;vertical-align:top;padding-top:6px">
-            <input type="radio" name="rc_${mv}" value="${r.FatturaId}" ${sel?'checked':''} ${st==='CONFERMATO'?'disabled':''}></td>
-          <td style="padding:4px 0">
-            <strong>FATTURA ${esc(r.fattura||'')}</strong> del ${r.data_fattura}
-            &nbsp; cliente ${stessoCliente?'✓ stesso':'⚠ DIVERSO'} <strong>${esc(r.cliente_fatt||'')}</strong> (${esc(r.cliente_fatt_cod||'')})
-            &nbsp; <span class="muted">${r.giorni}gg · ${r.art_comuni} art. in comune</span>
-            <br><span class="muted">articoli:</span> ${esc(r.art_fatt||'-')}</td></tr>`;
+  const daFare=movs.filter(k=>grp[k][0].Stato==='PROPOSTO');
+  const fatte=movs.filter(k=>grp[k][0].Stato!=='PROPOSTO');
+  const nMulti=daFare.filter(k=>grp[k][0].candidati>1).length;
+  let h=`<p class="muted"><strong>${daFare.length}</strong> da lavorare (${nMulti} con più candidati) · ${fatte.length} già lavorate. Le conferme NON ricalcolano i totali: <button onclick="caricaRiconc()">↻ Aggiorna totali</button>${window._raccDirty?' <span style="color:#e0a800">• modifiche da applicare</span>':''}</p>`;
+  daFare.forEach(mv=>{ h+=raccBlock(grp[mv]); });
+  if(!daFare.length) h+=`<div class="banner ok" style="font-size:12.5px">Tutte le proposte sono state lavorate. 🎉</div>`;
+  if(fatte.length){
+    h+=`<details style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">Già lavorate (${fatte.length}) — espandi</summary><div style="margin-top:6px">`;
+    fatte.forEach(mv=>{
+      const c=grp[mv], h0=c[0], conf=c.find(r=>r.Stato==='CONFERMATO');
+      const txt = h0.Stato==='CONFERMATO' ? `<span style="color:#2f7d52">✓ → fattura ${esc(conf?conf.fattura:'')}</span>` : '<span style="color:#b00">✗ rifiutato</span>';
+      h+=`<div style="font-size:12px;padding:3px 0;border-bottom:1px solid var(--line)">
+            ${esc(h0.cliente_sped||'')} · ord ${esc(h0.ordine||'-')} ${txt}
+            · <a href="#" onclick="raccordoAzione(${h0.MovEntryId},'reset');return false">↺ ripristina</a></div>`;
     });
-    h+=`</tbody></table>`;
-    if(st==='PROPOSTO')
-      h+=`<div style="margin-top:6px"><button onclick="raccordoAzione(${mv},'conferma')">Conferma</button>
-           <button onclick="raccordoAzione(${mv},'rifiuta')" style="margin-left:6px">Rifiuta</button></div>`;
-    else
-      h+=`<div style="margin-top:6px"><a href="#" onclick="raccordoAzione(${mv},'reset');return false">↺ ripristina</a></div>`;
-    h+=`</div>`;
-  });
+    h+=`</div></details>`;
+  }
   box.innerHTML=h;
+}
+function raccBlock(c){
+  const h0=c[0], mv=h0.MovEntryId;
+  const badge = h0.candidati>1?`<span style="color:#e0a800;font-weight:700">${h0.candidati} candidati — scegli</span>`:'';
+  let h=`<div style="border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:10px">
+      <div style="font-size:12.5px;background:#f3f1ea;padding:5px 7px;border-radius:4px">
+         <strong>SPEDIZIONE</strong> · ordine ${esc(h0.ordine||'-')} · DDT ${esc(h0.ddt||'-')} · ${h0.spedito}
+         &nbsp; cliente <strong>${esc(h0.cliente_sped||'')}</strong> (${esc(h0.cliente_sped_cod||'')}) ${badge}
+         <br><span class="muted">articoli:</span> ${esc(h0.art_sped||'-')}</div>
+      <table style="margin-top:6px;width:100%"><tbody>`;
+  c.forEach(r=>{
+    const stessoCliente=(r.cliente_fatt_cod===h0.cliente_sped_cod);
+    h+=`<tr style="border-top:1px solid var(--line)"><td style="width:24px;vertical-align:top;padding-top:6px">
+          <input type="radio" name="rc_${mv}" value="${r.FatturaId}" ${r.rank_best===1?'checked':''}></td>
+        <td style="padding:4px 0"><strong>FATTURA ${esc(r.fattura||'')}</strong> del ${r.data_fattura}
+          &nbsp; cliente ${stessoCliente?'✓ stesso':'⚠ DIVERSO'} <strong>${esc(r.cliente_fatt||'')}</strong> (${esc(r.cliente_fatt_cod||'')})
+          &nbsp; <span class="muted">${r.giorni}gg · ${r.art_comuni} art. in comune</span>
+          <br><span class="muted">articoli:</span> ${esc(r.art_fatt||'-')}</td></tr>`;
+  });
+  h+=`</tbody></table><div style="margin-top:6px"><button onclick="raccordoAzione(${mv},'conferma')">Conferma</button>
+       <button onclick="raccordoAzione(${mv},'rifiuta')" style="margin-left:6px">Rifiuta</button></div></div>`;
+  return h;
 }
 async function raccordoAzione(mov, azione){
   const body={movEntryId:mov, azione};
@@ -1852,8 +1860,8 @@ async function raccordoAzione(mov, azione){
     body.fatturaId=parseInt(r.value);
   }
   await fetch('/api/raccordo_azione',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  window._raccDirty=true;                 // i totali della riconciliazione sono da rifare (a richiesta, non ad ogni conferma)
   caricaRaccordo();
-  caricaRiconc();
 }
 async function ricDrill(k){
   const row=document.getElementById('ricdet_'+k), box=document.getElementById('ricbox_'+k);
