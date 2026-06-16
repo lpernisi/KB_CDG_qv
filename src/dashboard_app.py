@@ -830,6 +830,37 @@ def api_riconciliazione_cogs():
         WHERE g.Account='06021505' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]
     imb_gl = fn(imbgl["tot"]); imb_diretti = fn(imbgl["diretti"])
     imb_residuo = imb_gl - imb_diretti - imb_carico          # fatture imballaggi − nostro carico (righe senza codice)
+    # MATCH PER FORNITORE (chiave affidabile, niente grafo crossref): contabilita' (06021505, fornitore dalla riga
+    # FORNITORI 0502* della registrazione) vs magazzino (carico imballi 505 KLACQ-OA, h.CustSupp). Stesso periodo
+    # su entrambi i lati -> i totali tornano e ogni differenza e' localizzata sul fornitore. Drill ai documenti per riga.
+    imb_match = righe("""
+      WITH glA AS (
+        SELECT sup.CustSupp,
+          SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) gl,
+          SUM(CASE WHEN je.CRRefType<>27066402 THEN (CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) ELSE 0 END) gl_dir
+        FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+        CROSS APPLY (SELECT TOP 1 g2.CustSupp FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g2
+            WHERE g2.JournalEntryId=g.JournalEntryId AND g2.Account LIKE '0502%'
+              AND LTRIM(RTRIM(ISNULL(g2.CustSupp,'')))<>'') sup
+        WHERE g.Account='06021505' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+        GROUP BY sup.CustSupp),
+      carB AS (
+        SELECT h.CustSupp,
+          SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END) car
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='IMBALLAGGIO'
+        WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND h.CancelPhase1='0' AND h.CancelPhase2='0'
+          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+        GROUP BY h.CustSupp)
+      SELECT ISNULL(glA.CustSupp,carB.CustSupp) AS cod,
+             ISNULL(cs.CompanyName, ISNULL(glA.CustSupp,carB.CustSupp)) AS fornitore,
+             ROUND(ISNULL(glA.gl,0),2) AS gl, ROUND(ISNULL(glA.gl_dir,0),2) AS gl_diretti,
+             ROUND(ISNULL(carB.car,0),2) AS carico, ROUND(ISNULL(glA.gl,0)-ISNULL(carB.car,0),2) AS diff
+      FROM glA FULL OUTER JOIN carB ON carB.CustSupp=glA.CustSupp
+      LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=ISNULL(glA.CustSupp,carB.CustSupp)
+      ORDER BY ABS(ISNULL(glA.gl,0)-ISNULL(carB.car,0)) DESC""", a=anno, d=mda, h=ma)
     # Scomposizione della "competenza acquisti" (gl_acq − acq) in voci parlanti (vedi _ric_acq), SOLO PRODOTTI:
     acq_oneri = fn(righe("""SELECT SUM(w.ValAcqOneri) v FROM kodice.wap_ricalc w
         LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=w.Item
@@ -914,7 +945,10 @@ def api_riconciliazione_cogs():
                                "var_rim": r(rin_n - rfin_n)},
                     "imballaggi": {"rim_iniz": r(imb_iniz), "rim_fin": r(imb_fin), "carico": r(imb_carico),
                                    "var_rim": r(imb_iniz - imb_fin), "gl": r(imb_gl), "diretti": r(imb_diretti),
-                                   "residuo": r(imb_residuo)},
+                                   "via_fatture": r(imb_gl - imb_diretti), "residuo": r(imb_residuo),
+                                   "match": [{"cod": row["cod"], "fornitore": row["fornitore"],
+                                              "gl": fn(row["gl"]), "gl_diretti": fn(row["gl_diretti"]),
+                                              "carico": fn(row["carico"]), "diff": fn(row["diff"])} for row in imb_match]},
                     "ord_non_spediti": ord_ns})
 
 
@@ -1157,6 +1191,21 @@ def api_riconciliazione_drill():
               AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
             GROUP BY sup.fornitore, je.DocNo, CAST(je.DocumentDate AS date), CAST(g.AccrualDate AS date)
             ORDER BY ABS(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END)) DESC""", a=anno, d=mda, h=ma))
+    if k == "imb_viafatture":
+        # Costo imballaggi 06021505 registrato VIA FATTURE D'ACQUISTO (CRRefType=27066402): una riga per fattura,
+        # fornitore + protocollo + nr doc fornitore + importo a 06021505. Somma ESATTA = riga "via fatture".
+        return jsonify(righe("""SELECT ISNULL(cs.CompanyName, pd.Supplier) AS fornitore,
+                pd.DocNo AS protocollo, NULLIF(pd.SupplierDocNo,'') AS nr_doc_fornitore,
+                CONVERT(varchar(10),CAST(je.DocumentDate AS date),103) AS data,
+                ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS valore
+            FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+            JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=pd.Supplier
+            WHERE g.Account='06021505' AND je.CRRefType=27066402
+              AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+            GROUP BY ISNULL(cs.CompanyName, pd.Supplier), pd.DocNo, pd.SupplierDocNo, CAST(je.DocumentDate AS date)
+            ORDER BY ABS(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END)) DESC""", a=anno, d=mda, h=ma))
     if k == "imb_senzacodice":
         # INDICATIVO (non quadra all'euro col residuo: legame riga->conto non univoco). Righe SENZA codice articolo
         # sulle fatture d'acquisto che toccano 06021505: imballi acquistati che non entrano a magazzino -> costo puro.
@@ -1247,6 +1296,42 @@ def api_riconciliazione_drill():
             HAVING ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) > 0.005
             ORDER BY SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)) DESC""", a=anno, ini=ini, fin1=fin1))
     return jsonify([])
+
+
+@app.get("/api/riconciliazione_imb_forn")
+def api_riconciliazione_imb_forn():
+    """Drill imballaggi PER FORNITORE: i documenti dei due mondi, per vedere dove divergono.
+    CONTABILITA' = registrazioni su 06021505 del fornitore (fatture + prima nota diretta);
+    MAGAZZINO = movimenti di carico imballi (505 KLACQ-OA) del fornitore. Stesso periodo."""
+    anno, mda, ma = _ric_periodo()
+    cod = request.args.get("cod", "")
+    conta = righe("""SELECT 'CONTABILITA' AS lato,
+            CASE WHEN je.CRRefType=27066402 THEN 'fattura acquisto' ELSE 'prima nota diretta' END AS tipo,
+            ISNULL(pd.DocNo, je.DocNo) AS documento, NULLIF(ISNULL(pd.SupplierDocNo, je.DocNo),'') AS nr_fornitore,
+            CONVERT(varchar(10),CAST(je.DocumentDate AS date),103) AS data,
+            ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS importo
+        FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID AND je.CRRefType=27066402
+        WHERE g.Account='06021505' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+          AND EXISTS (SELECT 1 FROM KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g2
+              WHERE g2.JournalEntryId=g.JournalEntryId AND g2.Account LIKE '0502%' AND g2.CustSupp=:cod)
+        GROUP BY je.CRRefType, ISNULL(pd.DocNo, je.DocNo), NULLIF(ISNULL(pd.SupplierDocNo, je.DocNo),''), CAST(je.DocumentDate AS date)
+        ORDER BY ABS(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END)) DESC""",
+        a=anno, d=mda, h=ma, cod=cod)
+    mag = righe("""SELECT 'MAGAZZINO' AS lato, 'carico (movimento)' AS tipo,
+            h.DocNo AS documento, NULL AS nr_fornitore,
+            CONVERT(varchar(10),CAST(h.PostingDate AS date),103) AS data,
+            ROUND(SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END),2) AS importo
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='IMBALLAGGIO'
+        WHERE h.WAPMovementType=2032533505 AND h.InvRsn='KLACQ-OA' AND h.CancelPhase1='0' AND h.CancelPhase2='0'
+          AND h.CustSupp=:cod AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+        GROUP BY h.DocNo, CAST(h.PostingDate AS date)
+        ORDER BY ABS(SUM(d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END)) DESC""",
+        a=anno, d=mda, h=ma, cod=cod)
+    return jsonify(conta + mag)
 
 
 @app.get("/api/raccordo_proposte")
@@ -1879,17 +1964,24 @@ async function caricaRiconc(){
       <tr style="font-weight:700;border-top:2px solid var(--line)"><td>Consumo imballaggi (Δrim + carico)</td><td class="num">${eur((imb.rim_iniz||0)-(imb.rim_fin||0)+(imb.carico||0))}</td></tr>
       </tbody></table>
       <h3 style="margin-top:16px">Riconciliazione col conto costo imballaggi (06021505)</h3>
-      <p class="muted">Quanto del costo imballaggi a contabilità passa dal nostro magazzino e quanto no. Identità esatta dal lato contabile.</p>
+      <p class="muted">Composizione del costo imballaggi a contabilità per origine. <strong>Identità esatta</strong>: ogni drill somma alla sua riga.</p>
       <table><tbody>
-      <tr><td>= Nostro carico a magazzino (imballaggi entrati in giacenza)</td><td class="num">${eur(imb.carico)}</td></tr>
-      <tr><td>+ Spesati DIRETTI in prima nota (mai a magazzino) &nbsp;<a href="#" onclick="ricDrill('imb_diretti');return false">▸ documenti</a></td><td class="num">${eur(imb.diretti)}</td></tr>
-      <tr><td>+ Righe imballaggio SENZA codice articolo su fatture (residuo) &nbsp;<a href="#" onclick="ricDrill('imb_senzacodice');return false">▸ documenti (stima)</a></td><td class="num">${eur(imb.residuo)}</td></tr>
+      <tr><td>Via fatture d'acquisto &nbsp;<a href="#" onclick="ricDrill('imb_viafatture');return false">▸ documenti</a></td><td class="num">${eur(imb.via_fatture)}</td></tr>
+      <tr><td>+ Spesati DIRETTI in prima nota (senza ciclo acquisti) &nbsp;<a href="#" onclick="ricDrill('imb_diretti');return false">▸ documenti</a></td><td class="num">${eur(imb.diretti)}</td></tr>
       <tr style="font-weight:700;border-top:2px solid var(--line)"><td>= Costo imballaggi a CONTABILITÀ (GL 06021505)</td><td class="num">${eur(imb.gl)}</td></tr>
       </tbody></table>
+      <div id="ricdet_imb_viafatture" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_imb_viafatture"></div></div>
       <div id="ricdet_imb_diretti" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_imb_diretti"></div></div>
-      <div id="ricdet_imb_senzacodice" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_imb_senzacodice"></div></div>
+      <h3 style="margin-top:16px">Confronto contabilità ↔ magazzino, per FORNITORE (dove divergono)</h3>
+      <p class="muted">Stesso periodo sui due lati: i <strong>totali tornano</strong>. Ogni differenza è localizzata sul fornitore — clicca la riga per i <strong>documenti dei due mondi</strong> (contabilità vs magazzino) e capire dove nasce.</p>
+      <table><thead><tr><th>Fornitore</th><th class="num">Contabilità 06021505</th><th class="num">Magazzino (carico)</th><th class="num">Differenza</th></tr></thead><tbody>
+      ${(imb.match||[]).map((r,i)=>`<tr style="cursor:pointer" onclick="ricDrillForn('${esc(r.cod)}',${i})"><td>▸ ${esc(r.fornitore)}</td><td class="num">${eur(r.gl)}</td><td class="num">${eur(r.carico)}</td><td class="num" style="${Math.abs(r.diff||0)>0.005?'color:#b00;font-weight:600':'color:#2f7d52'}">${eur(r.diff)}</td></tr><tr><td colspan="4" style="padding:0"><div id="ricdet_forn_${i}" style="display:none;margin:4px 0"><div class="dbox" id="ricbox_forn_${i}"></div></div></td></tr>`).join('')}
+      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>TOTALE</td><td class="num">${eur((imb.match||[]).reduce((s,r)=>s+(r.gl||0),0))}</td><td class="num">${eur((imb.match||[]).reduce((s,r)=>s+(r.carico||0),0))}</td><td class="num">${eur((imb.match||[]).reduce((s,r)=>s+(r.diff||0),0))}</td></tr>
+      </tbody></table>
       <div class="banner" style="margin-top:10px;font-size:12px;background:#fbf6e7;border:1px solid #e0c97a;padding:8px 10px;border-radius:6px">
-        <strong>${eur((imb.diretti||0)+(imb.residuo||0))}</strong> di imballaggi NON passano dal magazzino → diventano <strong>costo puro</strong>. Non toccano il COGS prodotti (06021505 è fuori dai conti materiale), ma se quella merce è ancora in <strong>giacenza</strong> andrebbe capitalizzata (↑ rimanenze finali, ↓ costo) = potenziale <strong>recupero a bilancio</strong>. Correzione lato Mago: codificare le righe-merce così entrano in giacenza. NB: il drill "senza codice" è una <em>stima</em> (legame riga→conto non univoco); i "Conai/contributi" sono costo per natura, non recuperabili.</div>
+        La <strong>differenza</strong> = imballi messi a <strong>costo senza corrispondenza a magazzino</strong> (prima nota diretta + righe senza codice); se negativa = carico senza fattura su 06021505. Non tocca il COGS prodotti, ma se la merce è in <strong>giacenza</strong> va capitalizzata (↑ rimanenze, ↓ costo) = potenziale <strong>recupero a bilancio</strong>. Fix lato Mago: codificare le righe-merce.
+        <br>▸ <a href="#" onclick="ricDrill('imb_senzacodice');return false">worklist righe senza codice da correggere in Mago</a> <span class="muted">(Conai/contributi esclusi: costo per natura)</span></div>
+      <div id="ricdet_imb_senzacodice" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_imb_senzacodice"></div></div>
       </div>`;
   h+=`<div class="panel" style="margin-top:14px">
       <h2>Ordini fatturati non ancora spediti alla chiusura</h2>
@@ -1981,6 +2073,22 @@ async function ricDrill(k){
   const fmt=(c,v)=> (typeof v==='number') ? (isEuro(c)?eur(v):Number(v).toLocaleString('it-IT',{useGrouping:"always"})) : esc(String(v==null?'':v));
   let t=`<table class="sticky"><thead><tr>${cols.map(c=>`<th class="${typeof d[0][c]==='number'?'num':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>`;
   t+=d.map(r=>`<tr>${cols.map(c=>`<td class="${typeof r[c]==='number'?'num':''}">${fmt(c,r[c])}</td>`).join('')}</tr>`).join('');
+  t+=`</tbody></table>`;
+  box.innerHTML=`<div style="max-height:48vh;overflow:auto">${t}</div>`;
+}
+async function ricDrillForn(cod,i){
+  const row=document.getElementById('ricdet_forn_'+i), box=document.getElementById('ricbox_forn_'+i);
+  if(!row) return;
+  if(row.style.display!=='none'){ row.style.display='none'; return; }
+  row.style.display=''; box.innerHTML='<p class="muted">Carico…</p>';
+  const {a,m}=window._ricP;
+  const d=await j(`/api/riconciliazione_imb_forn?anno=${a}&mese_da=1&mese_a=${m}&cod=${encodeURIComponent(cod)}`);
+  if(!d || !d.length){ box.innerHTML='<p class="muted">Nessun documento per questo fornitore.</p>'; return; }
+  const cols=Object.keys(d[0]);
+  const isEuro=c=>/importo|val/i.test(c);
+  const fmt=(c,v)=> (typeof v==='number') ? (isEuro(c)?eur(v):Number(v).toLocaleString('it-IT',{useGrouping:"always"})) : esc(String(v==null?'':v));
+  let t=`<table class="sticky"><thead><tr>${cols.map(c=>`<th class="${typeof d[0][c]==='number'?'num':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>`;
+  t+=d.map(r=>`<tr${r.lato==='MAGAZZINO'?' style="background:#f3faf5"':''}>${cols.map(c=>`<td class="${typeof r[c]==='number'?'num':''}">${fmt(c,r[c])}</td>`).join('')}</tr>`).join('');
   t+=`</tbody></table>`;
   box.innerHTML=`<div style="max-height:48vh;overflow:auto">${t}</div>`;
 }
