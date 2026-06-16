@@ -1716,8 +1716,8 @@ const $=s=>document.querySelector(s);
 const API = location.pathname.replace(/\/+$/,'');
 const _origFetch = window.fetch.bind(window);
 window.fetch = (u, o) => _origFetch((typeof u === 'string' && u.indexOf('/api/') === 0) ? API + u : u, o);
-const eur=x=>(x==null?"—":Number(x).toLocaleString("it-IT",{minimumFractionDigits:2,maximumFractionDigits:2})+" €");
-const num=x=>(x==null?"—":Number(x).toLocaleString("it-IT"));
+const eur=x=>(x==null?"—":Number(x).toLocaleString("it-IT",{minimumFractionDigits:2,maximumFractionDigits:2,useGrouping:"always"})+" €");
+const num=x=>(x==null?"—":Number(x).toLocaleString("it-IT",{useGrouping:"always"}));
 let PER=null, SEL=null, PERIODI=[], SEZ='ricavi', SUBV='qual', SUBW='costi';
 
 async function j(u){ const r=await fetch(u); return r.json(); }
@@ -1914,7 +1914,7 @@ async function ricDrill(k){
   if(!d || !d.length){ box.innerHTML='<p class="muted">Nessun dettaglio per questa voce.</p>'; return; }
   const cols=Object.keys(d[0]);
   const isEuro=c=>/val|cost|cogs|scaric|differ|importo|riacq|magazz|document/i.test(c);
-  const fmt=(c,v)=> (typeof v==='number') ? (isEuro(c)?eur(v):Number(v).toLocaleString('it-IT')) : esc(String(v==null?'':v));
+  const fmt=(c,v)=> (typeof v==='number') ? (isEuro(c)?eur(v):Number(v).toLocaleString('it-IT',{useGrouping:"always"})) : esc(String(v==null?'':v));
   let t=`<table class="sticky"><thead><tr>${cols.map(c=>`<th class="${typeof d[0][c]==='number'?'num':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>`;
   t+=d.map(r=>`<tr>${cols.map(c=>`<td class="${typeof r[c]==='number'?'num':''}">${fmt(c,r[c])}</td>`).join('')}</tr>`).join('');
   t+=`</tbody></table>`;
@@ -2345,7 +2345,7 @@ function renderCostoDett(d, item, anno){
     h+=`<p style="margin-top:-6px"><strong>Fornitore preferenziale</strong>: ${esc(d.fornitore.CompanyName||d.fornitore.Supplier)}${d.fornitore.CompanyName?` <span class="muted">(${esc(d.fornitore.Supplier)})</span>`:''}${noi?` <span class="pill">noi · assemblaggio interno</span>`:''}</p>`;
     const ria=d.fornitore.riacquisto, lordo=d.fornitore.riacquisto_lordo;
     if(ria!=null && Number(ria)>0){ const cur=(d.fornitore.riacquisto_valuta||'').trim();
-      const fmt=v=> (cur && cur!=='EUR') ? Number(v).toLocaleString('it-IT',{minimumFractionDigits:2,maximumFractionDigits:2})+' '+cur : eur(v);
+      const fmt=v=> (cur && cur!=='EUR') ? Number(v).toLocaleString('it-IT',{minimumFractionDigits:2,maximumFractionDigits:2,useGrouping:"always"})+' '+cur : eur(v);
       const scontato = lordo!=null && Math.abs(Number(lordo)-Number(ria))>0.005;
       const dettSconti = scontato ? ` <span class="muted">(lordo ${fmt(lordo)}${d.fornitore.riacquisto_sconti?` − sconti ${esc(d.fornitore.riacquisto_sconti)}`:''})</span>` : '';
       const estera = cur && cur!=='EUR';
