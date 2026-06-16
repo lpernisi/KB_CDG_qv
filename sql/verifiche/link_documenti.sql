@@ -271,6 +271,14 @@ CREATE OR ALTER PROCEDURE kodice.usp_build_raccordo_proposto
 AS
 BEGIN
     SET NOCOUNT ON;
+
+    -- REBUILD CONSERVATIVO: salva gli stati gia' lavorati (CONFERMATO/RIFIUTATO) e li riapplica
+    -- a fine ricostruzione, cosi' un rebuild non cancella il lavoro manuale fatto da frontend.
+    DECLARE @stati TABLE (MovEntryId int, FatturaId int, Stato varchar(12), PRIMARY KEY (MovEntryId, FatturaId));
+    INSERT INTO @stati (MovEntryId, FatturaId, Stato)
+        SELECT MovEntryId, FatturaId, Stato FROM kodice.raccordo_proposto
+        WHERE Anno = @Anno AND Stato <> 'PROPOSTO';
+
     DELETE FROM kodice.raccordo_proposto WHERE Anno = @Anno;
 
     DECLARE @binf date = DATEADD(day, -90, DATEFROMPARTS(@Anno,1,1));
@@ -290,7 +298,9 @@ BEGIN
         WHERE sd.DocumentType IN ('3407874','3407878','3407876') AND v.FatturaId IS NULL
           AND sd.DocumentDate >= @binf AND sd.DocumentDate < @bsup
           AND sd.CustSupp NOT IN ('KODICEFR','KODICEDE','KODICEES')),
-    mtc AS (       -- coppie candidate: stesso cliente, |data|<=90, >=1 articolo in comune
+    ov AS (        -- coppie FORTI: stesso cliente, |data|<=90, >=1 articolo in comune.
+                   -- La fattura puo' avere un codice-KIT mentre la spedizione scarica i COMPONENTI: per
+                   -- agganciarli si ESPLODE il kit fatturato (vw_distinta) e si confronta sui componenti.
         SELECT a.MovEntryId, a.CustSupp, a.MovDate, b.SaleDocId, b.DocumentDate,
                ABS(DATEDIFF(day, a.MovDate, b.DocumentDate)) AS GgDiff,
                COUNT(DISTINCT LTRIM(RTRIM(ad.Item))) AS ArtComuni
@@ -298,13 +308,34 @@ BEGIN
         JOIN B b ON b.CustSupp = a.CustSupp AND ABS(DATEDIFF(day, a.MovDate, b.DocumentDate)) <= 90
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail ad ON ad.EntryId = a.MovEntryId
         JOIN KODICEBAGNO_4.dbo.MA_SaleDocDetail bd ON bd.SaleDocId = b.SaleDocId
-             AND LTRIM(RTRIM(bd.Item)) = LTRIM(RTRIM(ad.Item))
+        CROSS APPLY (   -- articoli fatturati ESPLOSI: componenti se kit, altrimenti l'articolo stesso
+            SELECT LTRIM(RTRIM(dd.Component)) AS Item FROM kodice.vw_distinta dd
+                 WHERE LTRIM(RTRIM(dd.BOM)) = LTRIM(RTRIM(bd.Item))
+            UNION ALL
+            SELECT LTRIM(RTRIM(bd.Item)) WHERE NOT EXISTS
+                 (SELECT 1 FROM kodice.vw_distinta dd WHERE LTRIM(RTRIM(dd.BOM)) = LTRIM(RTRIM(bd.Item)))
+        ) bx
+        WHERE bx.Item = LTRIM(RTRIM(ad.Item))
         GROUP BY a.MovEntryId, a.CustSupp, a.MovDate, b.SaleDocId, b.DocumentDate,
-                 ABS(DATEDIFF(day, a.MovDate, b.DocumentDate)))
+                 ABS(DATEDIFF(day, a.MovDate, b.DocumentDate))),
+    fb AS (        -- FALLBACK: spedizioni SENZA alcun candidato con articolo in comune (sostituzione TOTALE:
+                   -- ordinato un prodotto, spedito altro) -> aggancio su cliente + vicinanza data, ArtComuni=0.
+        SELECT a.MovEntryId, a.CustSupp, a.MovDate, b.SaleDocId, b.DocumentDate,
+               ABS(DATEDIFF(day, a.MovDate, b.DocumentDate)) AS GgDiff, 0 AS ArtComuni
+        FROM A a
+        JOIN B b ON b.CustSupp = a.CustSupp AND ABS(DATEDIFF(day, a.MovDate, b.DocumentDate)) <= 90
+        WHERE NOT EXISTS (SELECT 1 FROM ov o WHERE o.MovEntryId = a.MovEntryId)),
+    allc AS (SELECT * FROM ov UNION ALL SELECT * FROM fb)
     INSERT INTO kodice.raccordo_proposto (Anno, MovEntryId, FatturaId, CustSupp, MovDate, FatturaDate, GgDiff, ArtComuni, NumCandidati)
     SELECT @Anno, m.MovEntryId, m.SaleDocId, m.CustSupp, m.MovDate, m.DocumentDate, m.GgDiff, m.ArtComuni,
            COUNT(*) OVER (PARTITION BY m.MovEntryId)
-    FROM mtc m
+    FROM allc m
     OPTION (MAXDOP 1);
+
+    -- riapplica gli stati lavorati salvati (solo dove la coppia esiste ancora)
+    UPDATE rp SET Stato = s.Stato
+    FROM kodice.raccordo_proposto rp
+    JOIN @stati s ON s.MovEntryId = rp.MovEntryId AND s.FatturaId = rp.FatturaId
+    WHERE rp.Anno = @Anno;
 END
 GO
