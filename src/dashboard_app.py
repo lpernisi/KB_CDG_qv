@@ -841,7 +841,8 @@ def api_riconciliazione_cogs():
     vlb = righe("""SELECT
         ISNULL(SUM(CASE WHEN vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.InternalOrdNo NOT LIKE '1300%' AND vl.FatturaDate < :ini
                         THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) apertura,
-        ISNULL(SUM(CASE WHEN vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE') AND vl.InternalOrdNo NOT LIKE '1300%' THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) residuo,
+        ISNULL(SUM(CASE WHEN vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE') AND vl.InternalOrdNo NOT LIKE '1300%'
+                        THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) residuo,
         ISNULL(SUM(CASE WHEN vl.Modo='SOSTITUZIONE' OR vl.InternalOrdNo LIKE '1300%' THEN d.Qty*ISNULL(wr.WAPCost_ricalc,0) ELSE 0 END),0) sost
         FROM kodice.vendite_link vl
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=vl.MovEntryId
@@ -849,6 +850,15 @@ def api_riconciliazione_cogs():
         LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
         WHERE vl.MovDate>=:ini AND vl.MovDate<:fin1 AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, ini=_ini, fin1=_fin1)[0]
     sped_ap = fn(vlb["apertura"]); sped_res = fn(vlb["residuo"]); sped_sost = fn(vlb["sost"])
+    # raccordi CONFERMATI (ricerca contraria): la spedizione e' stata ri-agganciata a una fattura orfana
+    # gia' in COGS -> esce dal "spedito non fatturato". Set piccolo -> query mirata (NON join nella vlb, che rallenta).
+    sped_res -= fn(righe("""SELECT ISNULL(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)),0) v
+        FROM kodice.raccordo_proposto rp
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=rp.MovEntryId
+        LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(rp.MovDate)
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item))
+        WHERE rp.Anno=:a AND rp.Stato='CONFERMATO' AND rp.MovDate>=:ini AND rp.MovDate<:fin1
+          AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'""", a=anno, ini=_ini, fin1=_fin1)[0]["v"])
     r = lambda x: round(x, 2)
     # NESSUN PLUG: ogni componente e' MISURATA da fonte. Il ponte NON e' forzato a zero: cio' che le componenti
     # misurate non spiegano resta una riga esplicita "DIFFERENZA NON GIUSTIFICATA" (= Y − X − Σcomponenti), che
@@ -1118,7 +1128,8 @@ def api_riconciliazione_drill():
         #  uscita_diff = spedito su DDT/ordine con fattura DIFFERITA/non emessa (Modo SOLO_ORDINE/NESSUN_ORDINE).
         ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
         cond = ("vl.Modo NOT IN ('SOSTITUZIONE','SOLO_ORDINE','NESSUN_ORDINE') AND vl.FatturaDate < :ini"
-                if k == "uscita_prec" else "vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE')")
+                if k == "uscita_prec" else
+                "vl.Modo IN ('SOLO_ORDINE','NESSUN_ORDINE') AND vl.MovEntryId NOT IN (SELECT MovEntryId FROM kodice.raccordo_proposto WHERE Stato='CONFERMATO')")
         base = """ FROM kodice.vendite_link vl
             JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=vl.MovEntryId
             LEFT JOIN kodice.wap_ricalc wr ON wr.Item=LTRIM(RTRIM(d.Item)) AND wr.Anno=:a AND wr.Mese=MONTH(vl.MovDate)
@@ -1163,6 +1174,48 @@ def api_riconciliazione_drill():
             HAVING ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) > 0.005
             ORDER BY SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0)) DESC""", a=anno, ini=ini, fin1=fin1))
     return jsonify([])
+
+
+@app.get("/api/raccordo_proposte")
+def api_raccordo_proposte():
+    """RICERCA CONTRARIA: proposte di aggancio fattura-orfana -> spedizione-senza-fattura, da kodice.raccordo_proposto.
+    Per ogni spedizione del periodo le candidate ordinate, col MIGLIORE in cima (rank_best=1). I multi-candidato
+    (NumCandidati>1) sono in testa: richiedono la scelta. Stato per evidenziare gia' confermate/rifiutate."""
+    anno, mda, ma = _ric_periodo()
+    ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
+    rows = righe("""
+        SELECT rp.MovEntryId, ISNULL(cs.CompanyName, rp.CustSupp) AS cliente,
+               CONVERT(varchar(10), rp.MovDate, 103) AS spedito, mh.DocNo AS ddt,
+               rp.FatturaId, sd.DocNo AS fattura, CONVERT(varchar(10), rp.FatturaDate, 103) AS data_fattura,
+               sd.DocumentType AS tipo_fatt, rp.GgDiff AS giorni, rp.ArtComuni AS art_comuni,
+               rp.NumCandidati AS candidati, rp.Stato,
+               ROW_NUMBER() OVER (PARTITION BY rp.MovEntryId ORDER BY rp.GgDiff, rp.ArtComuni DESC) AS rank_best
+        FROM kodice.raccordo_proposto rp
+        JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = rp.FatturaId
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries mh ON mh.EntryId = rp.MovEntryId
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp = rp.CustSupp
+        WHERE rp.Anno = :a AND rp.MovDate >= :ini AND rp.MovDate < :fin1
+        ORDER BY rp.NumCandidati DESC, rp.MovEntryId, rp.GgDiff, rp.ArtComuni DESC""", a=anno, ini=ini, fin1=fin1)
+    return jsonify(rows)
+
+
+@app.post("/api/raccordo_azione")
+def api_raccordo_azione():
+    """Conferma/rifiuta/reset di una proposta di raccordo (reversibile). Conferma = sceglie UNA fattura per la
+    spedizione (le altre candidate -> SCARTATO); le CONFERMATE escono da 'spedito non fatturato' nella riconciliazione."""
+    d = request.get_json(force=True)
+    mov = int(d["movEntryId"]); azione = d.get("azione")
+    with engine.begin() as c:
+        if azione == "conferma":
+            fatt = int(d["fatturaId"])
+            c.execute(text("""UPDATE kodice.raccordo_proposto
+                SET Stato = CASE WHEN FatturaId = :f THEN 'CONFERMATO' ELSE 'SCARTATO' END
+                WHERE MovEntryId = :m"""), {"m": mov, "f": fatt})
+        elif azione == "rifiuta":
+            c.execute(text("UPDATE kodice.raccordo_proposto SET Stato='RIFIUTATO' WHERE MovEntryId=:m"), {"m": mov})
+        else:  # reset
+            c.execute(text("UPDATE kodice.raccordo_proposto SET Stato='PROPOSTO' WHERE MovEntryId=:m"), {"m": mov})
+    return jsonify({"ok": True})
 
 
 @app.get("/api/cerca_articolo")
@@ -1735,7 +1788,58 @@ async function caricaRiconc(){
       <p class="muted">Competenza al periodo (mesi 1–${m}/${a}): <strong>${(d.ord_non_spediti||0).toLocaleString('it-IT')}</strong> ordini con <strong>fattura</strong> emessa (COGS registrato) ma merce non ancora uscita dal magazzino al ${m}/${a}. Per competenza include anche gli ordini spediti <em>dopo</em> la chiusura; esclude gli ordini non ancora fatturati (tipicamente B2B aperti). Fonte: <code>VwKLStatoOrdini</code> (<code>CompletamenteConsegnato='No'</code> + spediti post-chiusura). <a href="#" onclick="ricDrill('ordnonsped');return false">▸ elenco documenti</a></p>
       <div id="ricdet_ordnonsped" style="display:none;margin-top:8px"><div class="dbox" id="ricbox_ordnonsped"></div></div>
       </div>`;
+  h+=`<div class="panel" style="margin-top:14px">
+      <h2>Raccordo fatture manuali (ricerca contraria)</h2>
+      <p class="muted">Spedizioni senza fattura agganciata, ricollegate alle <strong>fatture orfane</strong> (fatte a mano, senza riferimento all'ordine) per <strong>cliente + articolo in comune + ≤90 giorni</strong>. Il candidato migliore è pre-selezionato; dove ci sono più candidati scegli tu. <strong>Conferma</strong> = la spedizione esce da "spedito non fatturato".</p>
+      <div id="raccordo_box"><p class="muted">Carico…</p></div>
+      </div>`;
   $("#riconc").innerHTML=h;
+  caricaRaccordo();
+}
+async function caricaRaccordo(){
+  const {a,m}=window._ricP;
+  const d=await j(`/api/raccordo_proposte?anno=${a}&mese_da=1&mese_a=${m}`);
+  const box=$("#raccordo_box");
+  if(!d||!d.length){ box.innerHTML='<p class="muted">Nessuna proposta di raccordo per il periodo.</p>'; return; }
+  const grp={};
+  d.forEach(r=>{ (grp[r.MovEntryId]=grp[r.MovEntryId]||[]).push(r); });
+  const movs=Object.keys(grp);
+  const nMulti=movs.filter(k=>grp[k][0].candidati>1).length;
+  let h=`<p class="muted">${movs.length} spedizioni con proposta · ${nMulti} con più candidati (da scegliere).</p>`;
+  movs.forEach(mv=>{
+    const c=grp[mv], h0=c[0], st=h0.Stato;
+    const badge = st==='CONFERMATO'?'<span style="color:#2f7d52;font-weight:700">✓ confermato</span>'
+                : st==='RIFIUTATO'?'<span style="color:#b00;font-weight:700">✗ rifiutato</span>'
+                : (h0.candidati>1?`<span style="color:#e0a800;font-weight:700">${h0.candidati} candidati</span>`:'');
+    h+=`<div style="border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:8px">
+        <div style="font-size:13px"><strong>${esc(h0.cliente||'')}</strong> · spedito ${h0.spedito} · DDT ${esc(h0.ddt||'-')} ${badge}</div>
+        <table style="margin-top:6px"><tbody>`;
+    c.forEach(r=>{
+      const sel = (r.rank_best===1 && st!=='CONFERMATO') || (st==='CONFERMATO' && r.Stato==='CONFERMATO');
+      h+=`<tr><td style="width:24px"><input type="radio" name="rc_${mv}" value="${r.FatturaId}" ${sel?'checked':''} ${st==='CONFERMATO'?'disabled':''}></td>
+          <td>fattura <strong>${esc(r.fattura||'')}</strong> del ${r.data_fattura}</td>
+          <td class="num">${r.giorni} gg</td><td class="num">${r.art_comuni} art.</td></tr>`;
+    });
+    h+=`</tbody></table>`;
+    if(st==='PROPOSTO')
+      h+=`<div style="margin-top:6px"><button onclick="raccordoAzione(${mv},'conferma')">Conferma</button>
+           <button onclick="raccordoAzione(${mv},'rifiuta')" style="margin-left:6px">Rifiuta</button></div>`;
+    else
+      h+=`<div style="margin-top:6px"><a href="#" onclick="raccordoAzione(${mv},'reset');return false">↺ ripristina</a></div>`;
+    h+=`</div>`;
+  });
+  box.innerHTML=h;
+}
+async function raccordoAzione(mov, azione){
+  const body={movEntryId:mov, azione};
+  if(azione==='conferma'){
+    const r=document.querySelector(`input[name="rc_${mov}"]:checked`);
+    if(!r){ alert('Seleziona una fattura'); return; }
+    body.fatturaId=parseInt(r.value);
+  }
+  await fetch('/api/raccordo_azione',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  caricaRaccordo();
+  caricaRiconc();
 }
 async function ricDrill(k){
   const row=document.getElementById('ricdet_'+k), box=document.getElementById('ricbox_'+k);
