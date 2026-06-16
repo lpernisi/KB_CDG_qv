@@ -905,14 +905,18 @@ def api_riconciliazione_cogs():
     # l'inventario scarica il sostitutivo. Delta = valore spedito - valore fatturato (kit esplosi), gia' materializzato.
     sost_delta = fn(righe("""SELECT ISNULL(SUM(Delta),0) v FROM kodice.sostituzione_spedizione
         WHERE Anno=:a AND MovDate>=:ini AND MovDate<:fin1""", a=anno, ini=_ini, fin1=_fin1)[0]["v"])
-    # Fatturato ma NON ancora spedito: fatture del periodo (nel COGS) la cui merce non ha uno scarico 506 nel periodo.
-    # Specchio di uscita_prec, segno opposto: il COGS lo include, il magazzino fisico no -> si sottrae.
-    fatt_nonsped = fn(righe("""SELECT ISNULL(SUM(fr.ricavo_netto-fr.mdc1),0) v FROM core.fatto_riga fr
+    # Fatturato ma NON ancora spedito: ordini B2C dell'ORACOLO VwKLStatoOrdini (non consegnati alla chiusura o
+    # spediti dopo), già nel costo del venduto perché fatturati. B2C: NrOrdine = SaleDocId della fattura -> aggancio
+    # al costo via core.fatto_riga. Si SOTTRAE (il consumo fisico/contabile non l'ha ancora vista). Niente link-absence.
+    _fine = _fine_periodo(anno, ma)
+    fatt_nonsped = fn(righe("""SELECT ISNULL(SUM(fr.ricavo_netto-fr.mdc1),0) v
+        FROM core.fatto_riga fr
         LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=fr.codice_articolo
         WHERE fr.anno=:a AND fr.mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
-          AND fr.sale_doc_id NOT IN (SELECT FatturaId FROM kodice.vendite_link
-                WHERE FatturaId IS NOT NULL AND MovDate>=:ini AND MovDate<:fin1)""",
-        a=anno, d=mda, h=ma, ini=_ini, fin1=_fin1)[0]["v"])
+          AND EXISTS (SELECT 1 FROM kodice.vw_ordini_non_evasi v
+                WHERE CAST(fr.sale_doc_id AS varchar(21)) = v.NrOrdine
+                  AND v.DataOrdine <= :fine AND (v.CompletamenteConsegnato='No' OR v.DataSpedizione > :fine))""",
+        a=anno, d=mda, h=ma, fine=_fine)[0]["v"])
     r = lambda x: round(x, 2)
     # NESSUN PLUG: ogni componente e' MISURATA da fonte. Il ponte NON e' forzato a zero: cio' che le componenti
     # misurate non spiegano resta una riga esplicita "DIFFERENZA NON GIUSTIFICATA" (= Y − X − Σcomponenti), che
@@ -951,8 +955,8 @@ def api_riconciliazione_cogs():
          "perche": "Merce uscita dal magazzino in questo periodo ma fatturata prima: il suo costo del venduto è finito nel periodo precedente. Si AGGIUNGE qui per competenza fisica."},
         {"k": "uscita_diff", "label": "+ Merce spedita su bolla/ordine con fattura differita o non ancora emessa, o senza ordine collegato", "val": r(sped_res), "drill": True,
          "perche": "Merce uscita dal magazzino con fattura differita o non ancora emessa: il costo del venduto non l'ha ancora abbinata al fatturato, ma la merce è già uscita. Si AGGIUNGE."},
-        {"k": "fatt_nonsped", "label": "− Fatturato ma non ancora spedito (vendita nel costo del venduto, merce non ancora uscita dal magazzino)", "val": r(-fatt_nonsped), "drill": True,
-         "perche": "Specchio opposto di 'spedito ma fatturato prima': la fattura è emessa (quindi il costo è nel costo del venduto) ma la merce non è ancora uscita dal magazzino nel periodo. Il consumo fisico/contabile non l'ha ancora vista, quindi si SOTTRAE."},
+        {"k": "fatt_nonsped", "label": "− Fatturato ma non ancora spedito (ordini B2C già nel costo del venduto, merce non ancora uscita dal magazzino)", "val": r(-fatt_nonsped), "drill": True,
+         "perche": "Ordini B2C già fatturati (quindi il costo è nel costo del venduto) ma la cui merce non è ancora uscita dal magazzino alla chiusura del periodo (fonte VwKLStatoOrdini). Il consumo fisico/contabile non l'ha ancora vista, quindi si SOTTRAE. È lo specchio opposto di 'spedito ma fatturato prima'."},
     ]
     spiegato = cogs + sum(c["val"] for c in comp)
     non_giust = consumo_bil - spiegato                     # NON forzato a zero: e' il vero scarto non spiegato
@@ -1308,15 +1312,16 @@ def api_riconciliazione_drill():
             ORDER BY ABS(SUM(d.Qty*ISNULL(wr.WAPCost_ricalc,0))) DESC""", a=anno, ini=ini, fin1=fin1)
         return jsonify(_con_resto(rows, tot))
     if k == "fatt_nonsped":
-        # DETTAGLIO documento per documento: fatture del periodo (nel costo del venduto) la cui merce NON ha
-        # uno scarico nel periodo. Costo della merce per riga -> somma esatta alla riga del ponte (segno −).
-        ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
-        sub = """ FROM core.fatto_riga fr
+        # DETTAGLIO documento per documento: ordini B2C FATTURATI ma non spediti alla chiusura (oracolo
+        # VwKLStatoOrdini), col COSTO del venduto per riga -> somma esatta alla riga del ponte (segno −).
+        fine = _fine_periodo(anno, ma)
+        cond = """ FROM core.fatto_riga fr
             LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=fr.codice_articolo
             WHERE fr.anno=:a AND fr.mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
-              AND fr.sale_doc_id NOT IN (SELECT FatturaId FROM kodice.vendite_link
-                    WHERE FatturaId IS NOT NULL AND MovDate>=:ini AND MovDate<:fin1)"""
-        tot = -fn(righe("SELECT ISNULL(SUM(fr.ricavo_netto-fr.mdc1),0) v" + sub, a=anno, d=mda, h=ma, ini=ini, fin1=fin1)[0]["v"])
+              AND EXISTS (SELECT 1 FROM kodice.vw_ordini_non_evasi v
+                    WHERE CAST(fr.sale_doc_id AS varchar(21)) = v.NrOrdine
+                      AND v.DataOrdine <= :fine AND (v.CompletamenteConsegnato='No' OR v.DataSpedizione > :fine))"""
+        tot = -fn(righe("SELECT ISNULL(SUM(fr.ricavo_netto-fr.mdc1),0) v" + cond, a=anno, d=mda, h=ma, fine=fine)[0]["v"])
         rows = righe("""SELECT TOP 300 sd.DocNo AS documento, ISNULL(cs.CompanyName, sd.CustSupp) AS cliente,
                 CONVERT(varchar(10),CAST(sd.DocumentDate AS date),103) AS data_fattura,
                 ROUND(-SUM(fr.ricavo_netto-fr.mdc1),2) AS valore
@@ -1325,11 +1330,12 @@ def api_riconciliazione_drill():
             LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=sd.CustSupp
             LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item=fr.codice_articolo
             WHERE fr.anno=:a AND fr.mese BETWEEN :d AND :h AND ISNULL(ca.Classe,'PRODOTTO')='PRODOTTO'
-              AND fr.sale_doc_id NOT IN (SELECT FatturaId FROM kodice.vendite_link
-                    WHERE FatturaId IS NOT NULL AND MovDate>=:ini AND MovDate<:fin1)
+              AND EXISTS (SELECT 1 FROM kodice.vw_ordini_non_evasi v
+                    WHERE CAST(fr.sale_doc_id AS varchar(21)) = v.NrOrdine
+                      AND v.DataOrdine <= :fine AND (v.CompletamenteConsegnato='No' OR v.DataSpedizione > :fine))
             GROUP BY sd.DocNo, ISNULL(cs.CompanyName, sd.CustSupp), CAST(sd.DocumentDate AS date)
             HAVING ABS(SUM(fr.ricavo_netto-fr.mdc1)) > 0.005
-            ORDER BY ABS(SUM(fr.ricavo_netto-fr.mdc1)) DESC""", a=anno, d=mda, h=ma, ini=ini, fin1=fin1)
+            ORDER BY ABS(SUM(fr.ricavo_netto-fr.mdc1)) DESC""", a=anno, d=mda, h=ma, fine=fine)
         return jsonify(_con_resto(rows, tot))
     if k == "sost":
         # SINTESI sostituzioni gratuite per cliente/canale (chi ha ricevuto merce gratis).
