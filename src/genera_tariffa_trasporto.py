@@ -36,9 +36,14 @@ PAESI_SPECIFICI = {"FRANCIA", "GERMANIA", "SPAGNA", "PORTOGALLO"}
 N_PAESE = 120     # spedizioni minime nel Paese per tenerlo separato
 N_BASE  = 20      # spedizioni minime per emettere una riga base (area, fascia)
 N_OVR   = 30      # spedizioni minime per un'eccezione di canale
+N_GLOB  = 5       # soglia bassa per il jolly '*' (rete di sicurezza sulle fasce pesanti rare)
 DEV     = 0.15    # scostamento minimo dalla base perche' il canale meriti una riga propria
 
-FASCE = [(0,1),(1,2),(2,5),(5,10),(10,20),(20,30),(30,50),(50,100),(100,9999)]
+# Fasce di peso (kg). Sotto i 100 kg fini; sopra i 100 step di 100 fino a 1000, poi step di 500
+# (i pallet pesanti hanno tariffe molto diverse: un'unica fascia 100+ sottostimava).
+FASCE = [(0,1),(1,2),(2,5),(5,10),(10,20),(20,30),(30,50),(50,100),
+         (100,200),(200,300),(300,400),(400,500),(500,600),(600,700),(700,800),(800,900),(900,1000),
+         (1000,1500),(1500,2000),(2000,2500),(2500,3000),(3000,99999)]
 def fascia_di(p):
     for da,a in FASCE:
         if da <= p < a: return (da,a)
@@ -81,11 +86,21 @@ def main():
     est  = (df[df["nazione"] != "ITALIA"].groupby(["fascia"])
               .agg(n=("totale","size"), med=("totale","median")).reset_index())
     est["area"] = "ESTERO"
-    glob = (df.groupby(["fascia"])
-              .agg(n=("totale","size"), med=("totale","median")).reset_index())
-    glob["area"] = "*"
+    # jolly '*' globale: rete di sicurezza su OGNI fascia. Dove una fascia pesante ha pochi/zero
+    # dati, si RIPORTA IN AVANTI l'ultimo costo disponibile (il pesante non puo' costare meno del
+    # piu' leggero): cosi' nessun documento resta scoperto e si usa il dato reale dove c'e'.
+    gdf = df.groupby(["fascia"]).agg(n=("totale","size"), med=("totale","median")).reset_index()
+    gmed = {r.fascia: (int(r.n), float(r.med)) for r in gdf.itertuples()}
+    glob_rows, last = [], None
+    for f in FASCE:
+        if f in gmed and gmed[f][0] >= N_GLOB:
+            last = round(gmed[f][1], 2)
+        if last is not None:
+            glob_rows.append({"area": "*", "fascia": f, "n": gmed.get(f, (0,0))[0], "med": last})
+    glob = pd.DataFrame(glob_rows)
+    spec = spec[spec["n"] >= N_BASE]
+    est  = est[est["n"] >= N_BASE]
     base = pd.concat([spec, est, glob], ignore_index=True)
-    base = base[base["n"] >= N_BASE].copy()
     med_base = {(r.area, r.fascia): round(r.med,2) for r in base.itertuples()}
 
     # ECCEZIONI di canale: deviano dalla base della stessa area/fascia
