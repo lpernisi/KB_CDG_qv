@@ -1761,6 +1761,38 @@ def api_trasporto_riconciliazione():
     return jsonify({"sintesi": sint[0] if sint else {}, "imputato": imp[0] if imp else {}, "vettori": vet})
 
 
+@app.get("/api/trasporto_caricamenti")
+def api_trasporto_caricamenti():
+    """Registro di COSA e' stato caricato in landing: una riga per (anno, mese, vettore, destino)
+    con n. spedizioni, costo totale, quando caricato e se quel mese e' stato gia' elaborato/imputato."""
+    car = righe("""
+        SELECT anno, mese, ISNULL(vettore, '(n/d)') AS vettore, ISNULL(destino, '(n/d)') AS destino,
+               COUNT(*) AS n_spedizioni, CAST(SUM(totale) AS DECIMAL(18,2)) AS totale,
+               CONVERT(varchar(16), MAX(data_caricamento), 120) AS caricato_il
+        FROM src.fattura_vettore_riga
+        GROUP BY anno, mese, vettore, destino
+        ORDER BY anno DESC, mese DESC, vettore, destino
+    """)
+    elab = {(r["anno"], r["mese"]) for r in righe(
+        "SELECT DISTINCT anno, mese FROM core.componente_riga WHERE codice_componente='TRASPORTO'")}
+    for c in car:
+        c["elaborato"] = 1 if (c["anno"], c["mese"]) in elab else 0
+    return jsonify(car)
+
+
+@app.post("/api/trasporto_rimuovi")
+def api_trasporto_rimuovi():
+    """Rimuove dalla landing una fattura caricata (anno, mese, vettore, destino), per ricaricarla."""
+    d = request.get_json(force=True) or {}
+    with engine.begin() as c:
+        c.execute(text("""DELETE FROM src.fattura_vettore_riga
+            WHERE anno=:a AND mese=:m AND ISNULL(vettore,'')=ISNULL(:v,'') AND ISNULL(destino,'')=ISNULL(:dd,'')"""),
+            {"a": int(d["anno"]), "m": int(d["mese"]),
+             "v": (None if d.get("vettore") in (None, "(n/d)") else d["vettore"]),
+             "dd": (None if d.get("destino") in (None, "(n/d)") else d["destino"])})
+    return jsonify({"ok": True})
+
+
 @app.get("/api/trasporto_config")
 def api_trasporto_config():
     """Regole di stima del trasporto per fascia di peso (livello 1) + i canali/aree presenti nei dati
@@ -2130,6 +2162,7 @@ PAGINA = r"""<!DOCTYPE html>
           </div>
           <div id="traspMsg" class="muted" style="margin-top:6px"></div>
         </div>
+        <div id="traspCaric"></div>
         <div id="traspRic"></div>
       </div>
       <div class="panel">
@@ -2460,10 +2493,13 @@ async function trasportoElabora(){
   }catch(e){ msg.textContent='Errore: '+e; }
 }
 async function caricaTrasporti(){
+  // il pannello stime e il registro caricamenti si vedono SEMPRE (anche se il periodo è vuoto)
+  caricaTrasportoCfg();
+  caricaTrasportoCaricamenti();
   const {a,m}=periodo(); const box=$("#traspRic"); if(!box) return;
   const d=await j(`/api/trasporto_riconciliazione?anno=${a}&mese=${m}`);
   const s=d.sintesi||{}, imp=d.imputato||{};
-  if(!s.totale){ box.innerHTML=`<p class="muted">Nessuna spedizione caricata per ${a}-${String(m).padStart(2,'0')}. Carica il riepilogativo vettori qui sopra.</p>`; return; }
+  if(!s.totale){ box.innerHTML=`<p class="muted">Nessuna spedizione caricata per il periodo ${a}-${String(m).padStart(2,'0')} (controlla che il periodo in alto sia il mese di spedizione che hai caricato).</p>`; return; }
   const rows=[
     ['Imputato al venduto (entra nel margine)', s.agganciato, 'Spedizioni agganciate al documento di vendita tramite il numero ordine: il costo è ripartito sulle righe.'],
     ['Ordine non ancora fatturato', s.ordine_non_fatturato, 'Spedizione collegata a un ordine che però non risulta ancora fatturato: nessun documento su cui imputare.'],
@@ -2485,7 +2521,29 @@ async function caricaTrasporti(){
     h+=`</tbody></table></div>`;
   }
   box.innerHTML=h;
-  caricaTrasportoCfg();
+}
+async function caricaTrasportoCaricamenti(){
+  const box=$("#traspCaric"); if(!box) return;
+  const c=await j('/api/trasporto_caricamenti');
+  let h=`<h2 class="grp" style="margin-top:14px">Caricamenti effettuati `;
+  h+=`<button onclick="trasportoElabora()" title="Ricostruisce il legame ordine→documento e imputa il costo ai margini per tutti i mesi caricati">Elabora e imputa tutto</button></h2>`;
+  if(!c.length){ box.innerHTML=h+`<p class="muted">Nessuna fattura vettore ancora caricata. Usa il riquadro qui sopra (Leggi file → Importa).</p>`; return; }
+  h+=`<div class="panel"><table><thead><tr><th>Periodo spedizione</th><th>Vettore</th><th>Destino</th><th class="num">Spedizioni</th><th class="num">Costo</th><th>Caricato il</th><th>Imputato?</th><th></th></tr></thead><tbody>`;
+  c.forEach(x=>{
+    const mm=`${x.anno}-${String(x.mese).padStart(2,'0')}`;
+    const stato = x.elaborato ? '<span style="color:#2f7d52">✓ sì</span>' : '<span style="color:#e0a800">— no, premi «Elabora e imputa»</span>';
+    h+=`<tr><td>${mm}</td><td>${esc(x.vettore)}</td><td>${esc(x.destino)}</td>
+      <td class="num">${num(x.n_spedizioni)}</td><td class="num">${eur(x.totale)}</td>
+      <td class="muted">${esc(x.caricato_il||'')}</td><td>${stato}</td>
+      <td><button onclick='trasportoRimuovi(${JSON.stringify({anno:x.anno,mese:x.mese,vettore:x.vettore,destino:x.destino})})' title="Rimuovi questa fattura dalla landing (per ricaricarla)">🗑</button></td></tr>`;
+  });
+  h+=`</tbody></table></div>`;
+  box.innerHTML=h;
+}
+async function trasportoRimuovi(k){
+  if(!confirm(`Rimuovere il caricato ${k.anno}-${String(k.mese).padStart(2,'0')} · ${k.vettore} · ${k.destino}?`)) return;
+  await fetch('/api/trasporto_rimuovi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(k)});
+  caricaTrasportoCaricamenti();
 }
 let _traspCanali=[];
 async function caricaTrasportoCfg(){
