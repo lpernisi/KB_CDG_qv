@@ -755,7 +755,13 @@ def _ric_acq(anno, mda, ma):
         JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
         LEFT JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID
         WHERE """ + _GL_NODOC_WHERE + " OPTION (MAXDOP 1)", a=anno, d=mda, h=ma)[0]["v"])
-    return {"prec": fn(b["prec"]), "dopo": fn(b["dopo"]), "nofatt": fn(b["nofatt"]), "glnodoc": glnodoc}
+    # SIMMETRICO di 'dopo': fattura NEL periodo ma merce ricevuta (carico) DOPO il periodo.
+    # Il costo e' gia' in contabilita' (competenza) ma il carico cade nel periodo successivo.
+    fatt_dopo = fn(righe("""SELECT ISNULL(SUM(ValPuro),0) v FROM kodice.carico_fattura
+        WHERE Anno=:a AND MovDate>=:fin1 AND FattAccrual>=:ini AND FattAccrual<:fin1""",
+        a=anno, ini=ini, fin1=fin1)[0]["v"])
+    return {"prec": fn(b["prec"]), "dopo": fn(b["dopo"]), "nofatt": fn(b["nofatt"]),
+            "glnodoc": glnodoc, "fatt_dopo": fatt_dopo}
 
 
 @app.get("/api/riconciliazione_cogs")
@@ -951,6 +957,8 @@ def api_riconciliazione_cogs():
          "perche": "Dazi e trasporti d'importazione registrati in contabilità sul costo merci: vanno confrontati con quanto abbiamo caricato a magazzino sul costo della merce, perché spesso entrano in tempi diversi."},
         {"k": "ricnf_prec", "label": "− Merce ricevuta nel periodo ma già fatturata nel periodo precedente (a cavallo d'anno)", "val": r(-ab["prec"]), "drill": True,
          "perche": "Merce ricevuta in questo periodo ma con fattura d'acquisto già registrata prima: quel costo è stato contato nel periodo precedente, quindi qui si TOGLIE per non contarlo due volte."},
+        {"k": "fatt_carico_dopo", "label": "+ Merce fatturata nel periodo ma ricevuta a magazzino dopo (carico nel periodo successivo)", "val": r(ab["fatt_dopo"]), "drill": True,
+         "perche": "Fatture d'acquisto registrate nel periodo (il costo è già a contabilità per competenza) ma la cui merce entra a magazzino DOPO la chiusura: il carico cade nel periodo successivo. Si AGGIUNGE per competenza. È lo specchio opposto di 'merce ricevuta nel periodo, fatturata dopo'."},
         {"k": "uscita_prec", "label": "+ Merce spedita nel periodo ma fatturata prima (vendita a cavallo di periodo)", "val": r(sped_ap), "drill": True,
          "perche": "Merce uscita dal magazzino in questo periodo ma fatturata prima: il suo costo del venduto è finito nel periodo precedente. Si AGGIUNGE qui per competenza fisica."},
         {"k": "uscita_diff", "label": "+ Merce spedita su bolla/ordine con fattura differita o non ancora emessa, o senza ordine collegato", "val": r(sped_res), "drill": True,
@@ -1156,6 +1164,21 @@ def api_riconciliazione_drill():
         ab = _ric_acq(anno, mda, ma)
         tot = {"ricnf_prec": -ab["prec"], "ricnf_dopo": -ab["dopo"], "ricnf_nofatt": -ab["nofatt"]}[k]
         return jsonify(_con_resto(rows, tot))
+    if k == "fatt_carico_dopo":
+        # Simmetrico: fattura NEL periodo (competenza), merce caricata DOPO il periodo. Per fornitore/data.
+        ini = datetime.date(anno, mda, 1); fin1 = _fine_periodo(anno, ma) + datetime.timedelta(days=1)
+        rows = righe("""
+            SELECT TOP 300 ISNULL(cs.CompanyName, h.CustSupp) AS fornitore,
+                   CONVERT(varchar(10), cf.FattAccrual, 103) AS fattura_competenza,
+                   CONVERT(varchar(10), cf.MovDate, 103) AS carico,
+                   ROUND(SUM(cf.ValPuro), 2) AS valore
+            FROM kodice.carico_fattura cf
+            JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=cf.MovEntryId
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=h.CustSupp
+            WHERE cf.Anno=:a AND cf.MovDate>=:fin1 AND cf.FattAccrual>=:ini AND cf.FattAccrual<:fin1
+            GROUP BY ISNULL(cs.CompanyName, h.CustSupp), cf.FattAccrual, cf.MovDate
+            ORDER BY ABS(SUM(cf.ValPuro)) DESC""", a=anno, ini=ini, fin1=fin1)
+        return jsonify(_con_resto(rows, _ric_acq(anno, mda, ma)["fatt_dopo"]))
     if k == "glnodoc":
         # Le RIGHE DI REGISTRAZIONE sui conti materiale che NON hanno un documento (fattura) dietro: giroconti
         # manuali (es. "merci in transito"). DARE positivo / AVERE negativo: sommano al netto della riga.
