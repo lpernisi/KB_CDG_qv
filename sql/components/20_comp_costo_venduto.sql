@@ -33,6 +33,15 @@ BEGIN
     -- JOIN (non LEFT): le righe il cui articolo non ha un costo certificato per il
     -- mese NON producono riga di costo. Sono visibili come ricavo senza costo e,
     -- se anomale, gia' censite in kodice.costi_eccezioni.
+    --
+    -- REGOLA DI STORNO SULLE NOTE DI CREDITO (vedi docs/estrattore-qlik.md sez. 3-bis;
+    -- fonte gestionale: KODICEBAGNO_4.dbo.Split_Costi_Variabili). Il costo del venduto si
+    -- storna SOLO sulle NC (DocumentType 3407876) con causale Annullato/Inevadibile/Cambio
+    -- documento (InvoicingAccGroup IN 'A','I','C'): li' la merce di fatto rientra o la vendita
+    -- e' annullata. Su OGNI ALTRA NC (reso cliente, danno trasporto, difetto fornitore, danno
+    -- logistica, ...) il credito e' di SOLO PREZZO: la merce resta venduta, quindi il costo NON
+    -- si storna -> per quelle righe non emetto la riga di costo negativa.
+    -- In piu': sostituzioni "fotografo" (3407873, ProjectCode=7) -> costo 0 (niente riga).
     INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
     SELECT
         r.anno, r.mese, r.sale_doc_id, r.line,
@@ -44,6 +53,13 @@ BEGIN
          ON LTRIM(RTRIM(k.Item)) = r.codice_articolo   -- TRIM anche lato kodice: robusto agli spazi
         AND k.Anno = r.anno
         AND k.Mese = r.mese
-    WHERE r.anno = @anno AND r.mese = @mese;
+    JOIN KODICEBAGNO_4.dbo.MA_SaleDoc AS doc
+         ON doc.SaleDocId = r.sale_doc_id
+    WHERE r.anno = @anno AND r.mese = @mese
+      -- NC che NON devono stornare il costo: escluse (niente riga di costo)
+      AND NOT ( doc.DocumentType = '3407876'
+                AND LTRIM(RTRIM(doc.InvoicingAccGroup)) NOT IN ('A','I','C') )
+      -- sostituzioni "fotografo": costo azzerato
+      AND NOT ( doc.DocumentType = '3407873' AND doc.ProjectCode = '7' );
 END
 GO

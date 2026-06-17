@@ -60,6 +60,38 @@ oneriCommerciali = sum((BonusClienteGDO + ImportoSpeseTrasporto + ImportoProvvig
 ```
 Tabelle parametri di STIMA: `KB_TabSpeseTrasporti`, `kb_tabspesetraspAcquisto`, `KB_TabProvvigioniVendita`.
 
+## 3-bis. Regola di STORNO del costo sulle NOTE DI CREDITO (per tipo NC)
+
+**Fonte:** `KODICEBAGNO_4.dbo.Split_Costi_Variabili` (la SP che popola `KB_SaleDocDetailDatiAggiuntivi`).
+Su una **nota di credito** (`MA_SaleDoc.DocumentType = 3407876`) il costo NON va sempre stornato:
+dipende dalla **causale** (`MA_SaleDoc.InvoicingAccGroup`, descrizioni in `MA_AccountingGroups`).
+
+| Causale (InvoicingAccGroup) | Descrizione | Costo materiale |
+|---|---|---|
+| **A** | ANNULLATO | **STORNA** (vendita annullata, merce rientra) |
+| **I** | INEVADIBILE | **STORNA** |
+| **C** | CAMBIO DOCUMENTO | **STORNA** (+ solo qui si azzerano anche i costi finanziari: incasso/assicurazione/interessi) |
+| RC | RESO CLIENTE | NON storna |
+| DT | DANNO TRASPORTO | NON storna |
+| DF | DIFETTO FORNITORE | NON storna |
+| DL | DANNO LOGISTICA | NON storna |
+| R | RESO MERCE | NON storna |
+| PV / PI / CA / AL / RS … | Problematiche varie, Problema informatico, Cambio articolo, Amazon logistica, Rimborso spese… | NON storna |
+
+Nel gestionale lo storno "non fare" è realizzato azzerando le voci (`CostoMaterialeMedio=0`, e dal
+19.03.2026 anche `ImportoImballi`/`ImportoProvvigioni`/`ImportoSpeseTrasporto`/`CostoChannelENgine=0`)
+per le NC con `InvoicingAccGroup NOT IN ('A','I','C')`. In più: **sostituzioni "fotografo"**
+(`DocumentType=3407873`, `ProjectCode=7`) → costo azzerato.
+
+**Logica:** A/I/C = la merce di fatto rientra o la vendita è annullata, quindi il costo del venduto
+si restituisce; ogni altra NC è un credito di **solo prezzo** (la merce resta venduta) → il costo resta.
+
+**Implicazione per CDG_QV:** oggi `usp_comp_COSTO_VENDUTO` calcola `quantita * costo` su TUTTE le righe,
+quindi storna su **tutte** le NC (qty<0). Va ristretto allo storno per `InvoicingAccGroup IN ('A','I','C')`
+(+ fotografo a 0). Over-storno misurato su gen-2026: **≈ 14.308 €** (il nostro COGS risulta troppo basso).
+NB: la colonna `costomaterialemensile` di Qlik non storna nulla sulle NC, quindi applicando questa regola
+il CDG diventa più corretto del CE Qlik attuale. Vedi [[raffronto-cdg-vs-qlik]].
+
 ## 4. Implicazioni per CDG_QV (come rispecchiarlo)
 - **Dimensioni**: arricchire `core.fatto_riga` (o una vista `pres`) con gli attributi sopra, riusando le STESSE
   sorgenti/mappe (Canale = `MA_CustomerCtg.Category` del cliente; Dipartimento dalla mappa su Notes; Spedizione da
