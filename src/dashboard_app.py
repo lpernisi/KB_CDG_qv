@@ -2301,9 +2301,6 @@ PAGINA = r"""<!DOCTYPE html>
     <div class="sec" data-s="ce" onclick="sezione('ce')">Riepilogo CE</div>
     <div class="sec on" data-s="ricavi" onclick="sezione('ricavi')">Ricavi</div>
     <div class="sec" data-s="materiali" onclick="sezione('materiali')">Costo dei materiali</div>
-    <div class="sec" data-s="costo0" onclick="sezione('costo0')">Articoli a costo 0 🔧</div>
-    <div class="sec" data-s="riconc" onclick="sezione('riconc')">Riconciliazione ↔ Co.Ge.</div>
-    <div class="sec" data-s="valacq" onclick="sezione('valacq')">Validazione acquisti</div>
     <div class="sec todo" data-s="commerciali" onclick="sezione('commerciali')">Costi commerciali</div>
     <div class="sec" data-s="trasporti" onclick="sezione('trasporti')">Costi di trasporto</div>
     <div class="sec todo" data-s="imballi" onclick="sezione('imballi')">Imballi</div>
@@ -2335,39 +2332,33 @@ PAGINA = r"""<!DOCTYPE html>
       </div>
     </section>
 
-    <section id="sec-riconc" class="sez-main" style="display:none">
-      <h2 class="grp">Riconciliazione · costo del venduto CdG ↔ Contabilità</h2>
-      <div id="riconc"><p class="muted">Carico…</p></div>
-    </section>
-
-    <section id="sec-valacq" class="sez-main" style="display:none">
-      <h2 class="grp">Validazione acquisti · CdG ↔ Contabilità</h2>
-      <div id="valacq"><p class="muted">Carico…</p></div>
-    </section>
-
-    <section id="sec-costo0" class="sez-main" style="display:none">
-      <h2 class="grp">Articoli a costo 0 · merce venduta senza costo del venduto</h2>
-      <div id="costo0"><p class="muted">Carico…</p></div>
-    </section>
-
     <section id="sec-materiali" class="sez-main" style="display:none">
       <h2 class="grp">Costo dei materiali · nostro costo (fonte principale)</h2>
-      <p class="muted" style="margin-top:-4px">Basato sul ricalcolo parallelo mensile (<code>kodice.wap_ricalc</code> / <code>vw_costo_eff</code>). MA_ItemsWAP non è più la fonte: resta solo come <strong>raffronto</strong> (sezione dedicata a sinistra).</p>
-      <p style="margin:2px 0 8px">
-        <a href="#" onclick="elaboraMese();return false" style="display:inline-block;padding:5px 12px;background:#2f7d52;color:#fff;border-radius:5px;text-decoration:none;font-weight:600">▶ Elabora questo mese</a>
-        <a href="#" onclick="rilanciaRic();return false" style="display:inline-block;padding:5px 12px;background:#2f5d8a;color:#fff;border-radius:5px;text-decoration:none;font-weight:600;margin-left:6px">↻ Ricalcola WAP anno in corso</a>
-        <span class="muted"> &nbsp;<strong>Elabora</strong> = carica vendite + prepara costi + assembla il mese selezionato. <strong>Ricalcola WAP</strong> = ricostruisce i costi di magazzino dell'anno (dopo le bonifiche).</span></p>
-      <div id="mesebanner"></div>
+      <div id="materiali-head">
+        <p class="muted" style="margin-top:-4px">Basato sul ricalcolo parallelo mensile (<code>kodice.wap_ricalc</code> / <code>vw_costo_eff</code>). MA_ItemsWAP non è più la fonte: resta solo come <strong>raffronto</strong> (sezione dedicata a sinistra).</p>
+        <p style="margin:2px 0 8px">
+          <a href="#" onclick="elaboraMese();return false" style="display:inline-block;padding:5px 12px;background:#2f7d52;color:#fff;border-radius:5px;text-decoration:none;font-weight:600">▶ Elabora questo mese</a>
+          <a href="#" onclick="rilanciaRic();return false" style="display:inline-block;padding:5px 12px;background:#2f5d8a;color:#fff;border-radius:5px;text-decoration:none;font-weight:600;margin-left:6px">↻ Ricalcola WAP anno in corso</a>
+          <span class="muted"> &nbsp;<strong>Elabora</strong> = carica vendite + prepara costi + assembla il mese selezionato. <strong>Ricalcola WAP</strong> = ricostruisce i costi di magazzino dell'anno (dopo le bonifiche).</span></p>
+        <div id="mesebanner"></div>
+      </div>
       <div class="subtabs">
         <div class="subtab on" data-sv="qual" onclick="sottoVista('qual')">Certificazione qualità</div>
         <div class="subtab" data-sv="bonifica" onclick="sottoVista('bonifica')">Bonifica apertura</div>
         <div class="subtab" data-sv="trend" onclick="sottoVista('trend')">Trend del costo</div>
         <div class="subtab" data-sv="raffronto" onclick="sottoVista('raffronto')">Raffronto vs Mago</div>
+        <span style="align-self:center;margin:0 4px;color:var(--muted);font-weight:700">·&nbsp;Verifiche:</span>
+        <div class="subtab" data-sv="riconc" onclick="sottoVista('riconc')">Riconciliazione ↔ Co.Ge.</div>
+        <div class="subtab" data-sv="valacq" onclick="sottoVista('valacq')">Validazione acquisti</div>
+        <div class="subtab" data-sv="costo0" onclick="sottoVista('costo0')">Articoli a costo 0 🔧</div>
       </div>
       <div id="v-qual"><div id="qual"><p class="muted">Carico…</p></div></div>
       <div id="v-bonifica" style="display:none"><div id="bonifica"><p class="muted">Carico…</p></div></div>
       <div id="v-trend" style="display:none"><div id="trend"><p class="muted">Carico…</p></div></div>
       <div id="v-raffronto" style="display:none"><div id="raffronto"><p class="muted">Carico…</p></div></div>
+      <div id="v-riconc" style="display:none"><h2 class="grp">Riconciliazione · costo del venduto CdG ↔ Contabilità</h2><div id="riconc"><p class="muted">Carico…</p></div></div>
+      <div id="v-valacq" style="display:none"><h2 class="grp">Validazione acquisti · CdG ↔ Contabilità</h2><div id="valacq"><p class="muted">Carico…</p></div></div>
+      <div id="v-costo0" style="display:none"><h2 class="grp">Articoli a costo 0 · merce venduta senza costo del venduto</h2><div id="costo0"><p class="muted">Carico…</p></div></div>
     </section>
 
     <section id="sec-wap" class="sez-main" style="display:none">
@@ -2487,9 +2478,9 @@ async function init(){
   if(ps.length){ sel.value=`${ps[ps.length-1].anno}-${ps[ps.length-1].mese}`; }
   PERIODI=ps; sel.onchange=onPeriodo;
   const h=location.hash.replace('#','');
-  if(['qual','bonifica','trend'].includes(h)){ SUBV=h; sezione('materiali'); }
+  if(['qual','bonifica','trend','raffronto','riconc','valacq','costo0'].includes(h)){ SUBV=h; sezione('materiali'); }
   else if(['anom','costi'].includes(h)){ SUBW=h; sezione('wap'); }
-  else if(['ce','ricavi','materiali','costo0','riconc','valacq','wap','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
+  else if(['ce','ricavi','materiali','wap','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
   else sezione('ricavi');
   avviaExport();
 }
@@ -2497,9 +2488,6 @@ function periodo(){ const [a,m]=$("#periodo").value.split("-"); return {a:+a,m:+
 function onPeriodo(){ SEL=null; cerca();
   if(SEZ==='ce') caricaCE();
   if(SEZ==='materiali'){ aggiornaStatoMese(); caricaSub(); }
-  if(SEZ==='riconc') caricaRiconc();
-  if(SEZ==='valacq') caricaValAcq();
-  if(SEZ==='costo0') caricaCosto0();
   if(SEZ==='trasporti') caricaTrasporti();
   if(SEZ==='wap') sottoWap(SUBW);
 }
@@ -2510,9 +2498,6 @@ function sezione(s){
   if(s==='ce') caricaCE();
   else if(s==='ricavi') cerca();
   else if(s==='materiali'){ aggiornaStatoMese(); sottoVista(SUBV); }
-  else if(s==='riconc') caricaRiconc();
-  else if(s==='valacq') caricaValAcq();
-  else if(s==='costo0') caricaCosto0();
   else if(s==='trasporti') caricaTrasporti();
   else if(s==='wap') sottoWap(SUBW);
   else if(s==='sql') caricaSql();
@@ -2929,9 +2914,14 @@ async function traspCfgElimina(id){ if(!confirm('Eliminare la regola #'+id+'?'))
 function sottoVista(v){
   SUBV=v;
   document.querySelectorAll('#sec-materiali .subtab').forEach(e=>e.classList.toggle('on',e.dataset.sv===v));
-  ['qual','bonifica','trend','raffronto'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
+  ['qual','bonifica','trend','raffronto','riconc','valacq','costo0'].forEach(x=>{ const el=$('#v-'+x); if(el) el.style.display=(x===v)?'':'none'; });
+  // l'intestazione "Costo dei materiali" (pulsanti Elabora/Ricalcola + banner mese) serve solo alle viste di costo,
+  // non alle Verifiche (che lavorano sul periodo progressivo).
+  const head=$('#materiali-head'); const isCosto=['qual','bonifica','trend','raffronto'].includes(v);
+  if(head) head.style.display=isCosto?'':'none';
   if(v==='qual') caricaQual(); else if(v==='bonifica') caricaBonifica();
   else if(v==='trend') caricaTrend(); else if(v==='raffronto') caricaRaffronto();
+  else if(v==='riconc') caricaRiconc(); else if(v==='valacq') caricaValAcq(); else if(v==='costo0') caricaCosto0();
 }
 async function caricaRaffronto(){
   const {a,m}=periodo();
