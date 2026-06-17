@@ -2028,6 +2028,73 @@ def api_trasporto_config_elimina():
     return jsonify({"ok": True})
 
 
+# ---- Tabella di attribuzione delle COMMISSIONI marketplace (cfg.commissione_marketplace) ----
+@app.get("/api/commissione_config")
+def api_commissione_config():
+    """Tariffe commissione marketplace (cascata Marketplace/Paese/Tipo prodotto) + le liste per
+    compilare (canali noti, tipi articolo presenti nelle vendite)."""
+    regole = righe("""SELECT id, canale, marketplace, area, tipo_articolo, commissione_pct, recupero_pct,
+                             CONVERT(varchar(10), valido_dal, 23) AS valido_dal, note
+                      FROM cfg.commissione_marketplace
+                      ORDER BY ISNULL(marketplace, canale), area, tipo_articolo, valido_dal""")
+    canali = righe("""SELECT canale, MAX(marketplace) AS marketplace
+                      FROM cfg.commissione_marketplace GROUP BY canale ORDER BY MAX(marketplace), canale""")
+    tipi = righe("""SELECT DISTINCT LTRIM(RTRIM(it.ItemType)) AS tipo, MAX(ity.Description) AS descr
+                    FROM core.fatto_riga f
+                    JOIN KODICEBAGNO_4.dbo.MA_Items it ON LTRIM(RTRIM(it.Item)) = f.codice_articolo
+                    LEFT JOIN KODICEBAGNO_4.dbo.MA_ItemTypes ity ON ity.CodeType = it.ItemType
+                    WHERE NULLIF(LTRIM(RTRIM(it.ItemType)), '') IS NOT NULL
+                    GROUP BY LTRIM(RTRIM(it.ItemType)) ORDER BY MAX(ity.Description)""")
+    return jsonify({"regole": regole, "canali": canali, "tipi": tipi})
+
+
+@app.post("/api/commissione_config_salva")
+def api_commissione_config_salva():
+    """Inserisce o aggiorna una tariffa commissione (UI config). id mancante/0 = nuova riga."""
+    d = request.get_json(force=True) or {}
+    p = {
+        "id":    int(d.get("id") or 0),
+        "canale": (d.get("canale") or "*").strip() or "*",
+        "marketplace": ((d.get("marketplace") or "").strip() or None),
+        "area":  (d.get("area") or "*").strip() or "*",
+        "tipo":  (d.get("tipo_articolo") or "*").strip() or "*",
+        "comm":  float(d.get("commissione_pct") or 0),
+        "rec":   float(d.get("recupero_pct") or 0),
+        "dal":   (d.get("valido_dal") or "2020-01-01"),
+        "note":  (d.get("note") or None),
+    }
+    with engine.begin() as c:
+        if p["id"]:
+            c.execute(text("""UPDATE cfg.commissione_marketplace SET canale=:canale, marketplace=:marketplace,
+                area=:area, tipo_articolo=:tipo, commissione_pct=:comm, recupero_pct=:rec, valido_dal=:dal, note=:note
+                WHERE id=:id"""), p)
+        else:
+            c.execute(text("""INSERT INTO cfg.commissione_marketplace
+                (canale, marketplace, area, tipo_articolo, commissione_pct, recupero_pct, valido_dal, note)
+                VALUES (:canale,:marketplace,:area,:tipo,:comm,:rec,:dal,:note)"""), p)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/commissione_config_elimina")
+def api_commissione_config_elimina():
+    d = request.get_json(force=True) or {}
+    with engine.begin() as c:
+        c.execute(text("DELETE FROM cfg.commissione_marketplace WHERE id=:id"), {"id": int(d.get("id"))})
+    return jsonify({"ok": True})
+
+
+@app.post("/api/commissione_ricalcola")
+def api_commissione_ricalcola():
+    """Dopo aver cambiato le tariffe: rilancia il componente PROVVIGIONI per il periodo scelto e
+    riassembla i margini. Le modifiche alla tabella NON cambiano i numeri finche' non si ricalcola."""
+    d = request.get_json(force=True) or {}
+    a = int(d.get("anno")); m = int(d.get("mese"))
+    with engine.begin() as c:
+        c.exec_driver_sql(f"EXEC dbo.usp_comp_PROVVIGIONI @anno={a}, @mese={m};")
+        c.exec_driver_sql(f"EXEC dbo.usp_build_fatto_riga @anno={a}, @mese={m};")
+    return jsonify({"ok": True, "anno": a, "mese": m})
+
+
 # Espressioni di dimensione del CE (condivise tra /api/ce e /api/ce_drill).
 CE_DIMS = {
     "canale":        "CASE WHEN sd.CustSupp='135774' THEN 'SAVINI' ELSE COALESCE(NULLIF(LTRIM(RTRIM(ctg.Notes)),''), opt.Category, '(n/d)') END",
@@ -2644,7 +2711,73 @@ async function caricaCommerciali(){
       <tr><td>Piattaforma marketplace (ChannelEngine)</td><td class="num">${eur(T.channel_engine)}</td><td class="num">${dl(T.channel_engine,O.channel_engine)}</td></tr>
       <tr><td>Provvigioni agenti</td><td class="num">${eur(T.agenti)}</td><td class="num">${dl(T.agenti,O.agenti)}</td></tr>
       </tbody></table></div></details>`;
+  // gestione tariffe commissioni — pannello collassabile (chiuso)
+  h+=`<details class="sez"><summary>⚙️ Gestione tariffe commissioni<span class="cnt">Marketplace / Paese / Tipo prodotto</span></summary>
+      <div class="panel"><div id="commCfg"><p class="muted">Carico…</p></div></div></details>`;
   $("#commerciali").innerHTML=h;
+  caricaCommissioneCfg();
+}
+let _commTipi=[];
+async function caricaCommissioneCfg(){
+  const box=$("#commCfg"); if(!box) return;
+  const d=await j('/api/commissione_config'); _commTipi=d.tipi||[];
+  const r=d.regole||[];
+  let h=`<p class="muted" style="margin-top:0">Tariffe lette dal componente <em>Commissioni marketplace</em>, risolte a CASCATA come la stima trasporto: vince la riga più specifica (canale esatto › <code>*</code>; Paese › Estero › <code>*</code>; tipo prodotto › <code>*</code>) e, a parità, la <em>valido dal</em> più recente. Inserisci solo le ECCEZIONI. <strong>Recupero %</strong> = quota stornata sulle note di credito di reso (gli annullamenti/cambi stornano sempre il 100%).</p>`;
+  h+=`<table><thead><tr><th>Marketplace</th><th>Canale</th><th>Area</th><th>Tipo prod.</th><th class="num">Commiss. %</th><th class="num">Recupero %</th><th>Valido dal</th><th>Note</th><th></th></tr></thead><tbody>`;
+  r.forEach(x=>{
+    h+=`<tr><td>${esc(x.marketplace||'')}</td><td><code>${esc(x.canale)}</code></td><td>${esc(x.area)}</td><td>${esc(x.tipo_articolo)}</td>
+      <td class="num">${num(x.commissione_pct)}</td><td class="num">${num(x.recupero_pct)}</td>
+      <td>${esc(x.valido_dal)}</td><td>${esc(x.note||'')}</td>
+      <td><button onclick='commCfgEdit(${JSON.stringify(x).replace(/'/g,"&#39;")})'>✎</button>
+          <button onclick='commCfgElimina(${x.id})'>🗑</button></td></tr>`;
+  });
+  if(!r.length) h+=`<tr><td colspan="9" class="muted">Nessuna tariffa: aggiungine una qui sotto.</td></tr>`;
+  h+=`</tbody></table>`;
+  const canOpts=(d.canali||[]).map(c=>`<option value="${esc(c.canale)}">${esc(c.canale)}${c.marketplace?' — '+esc(c.marketplace):''}</option>`).join('');
+  const tipoOpts=`<option value="*">* (tutti)</option>`+(_commTipi).map(t=>`<option value="${esc(t.tipo)}">${esc(t.tipo)}${t.descr?' — '+esc(t.descr):''}</option>`).join('');
+  h+=`<div style="margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:8px">
+    <strong id="commCfgTit">Nuova tariffa</strong>
+    <input type="hidden" id="ccId" value="0">
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin-top:6px">
+      <label>Canale (marketplace)<br><select id="ccCanale">${canOpts}</select></label>
+      <label>Area<br><select id="ccArea"><option>*</option><option>ITALIA</option><option>FRANCIA</option><option>GERMANIA</option><option>SPAGNA</option><option>PORTOGALLO</option><option>AUSTRIA</option><option>BELGIO</option><option>PAESI BASSI</option><option>POLONIA</option><option>ESTERO</option></select></label>
+      <label>Tipo prodotto<br><select id="ccTipo">${tipoOpts}</select></label>
+      <label>Commissione %<br><input id="ccComm" type="number" step="0.01" value="0" style="width:90px"></label>
+      <label>Recupero %<br><input id="ccRec" type="number" step="0.01" value="0" style="width:90px"></label>
+      <label>Valido dal<br><input id="ccDal" type="date" value="2026-01-01"></label>
+      <label>Note<br><input id="ccNote" type="text" style="width:150px"></label>
+      <button onclick="commCfgSalva()">Salva</button>
+      <button onclick="commCfgReset()">Pulisci</button>
+    </div>
+    <p class="muted" style="margin:8px 0 0">Dopo aver modificato le tariffe, ricalcola il mese selezionato:
+      <button onclick="commCfgRicalcola()">↻ Ricalcola commissioni del periodo</button> <span id="ccRicEsito"></span></p>
+  </div>`;
+  box.innerHTML=h;
+}
+function commCfgReset(){ $("#ccId").value='0'; $("#commCfgTit").textContent='Nuova tariffa';
+  $("#ccArea").value='*'; $("#ccTipo").value='*'; $("#ccComm").value='0'; $("#ccRec").value='0';
+  $("#ccDal").value='2026-01-01'; $("#ccNote").value=''; }
+function commCfgEdit(x){ $("#ccId").value=x.id; $("#commCfgTit").textContent='Modifica tariffa #'+x.id;
+  $("#ccCanale").value=x.canale; $("#ccArea").value=x.area; $("#ccTipo").value=x.tipo_articolo;
+  $("#ccComm").value=x.commissione_pct; $("#ccRec").value=x.recupero_pct; $("#ccDal").value=x.valido_dal; $("#ccNote").value=x.note||'';
+  $("#commCfg").scrollIntoView({block:'end',behavior:'smooth'}); }
+async function commCfgSalva(){
+  const sel=$("#ccCanale"); const label=sel.options[sel.selectedIndex].text;
+  const mk=label.includes(' — ')?label.split(' — ').slice(1).join(' — '):'';
+  const body={id:+$("#ccId").value, canale:sel.value, marketplace:mk, area:$("#ccArea").value,
+    tipo_articolo:$("#ccTipo").value, commissione_pct:+$("#ccComm").value, recupero_pct:+$("#ccRec").value,
+    valido_dal:$("#ccDal").value, note:$("#ccNote").value};
+  await fetch('/api/commissione_config_salva',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  commCfgReset(); caricaCommissioneCfg();
+}
+async function commCfgElimina(id){ if(!confirm('Eliminare la tariffa #'+id+'?')) return;
+  await fetch('/api/commissione_config_elimina',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  caricaCommissioneCfg();
+}
+async function commCfgRicalcola(){
+  const {a,m}=periodo(); const e=$("#ccRicEsito"); if(e) e.textContent='ricalcolo…';
+  await fetch('/api/commissione_ricalcola',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({anno:a,mese:m})});
+  if(e) e.textContent='✓ fatto'; caricaCommerciali();
 }
 async function caricaCosto0(){
   const {a,m}=periodo();
