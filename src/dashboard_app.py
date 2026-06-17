@@ -1606,6 +1606,17 @@ def api_riconciliazione_acquisti_forn():
         OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
     link = {x["MovEntryId"]: x["FattId"] for x in
             righe("SELECT MovEntryId, FattId FROM kodice.carico_fattura WHERE Anno=:a", a=anno)}
+    # Le RETTIFICHE differenza cambio (ACQ-VALD) NON sono in carico_fattura: in Mago sono movimenti GENERATI
+    # dalla fattura (CrossReference Origin = fattura 27066402 -> Derived = movimento 27066370). Le aggancio alla
+    # loro fattura con questo legame VERO, così rientrano nella riga della fattura e non restano righe orfane.
+    xref = {x["eid"]: x["fid"] for x in righe("""
+        SELECT DISTINCT x.DerivedDocID AS eid, x.OriginDocID AS fid
+        FROM KODICEBAGNO_4.dbo.MA_CrossReferences x
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntries h ON h.EntryId=x.DerivedDocID
+        WHERE x.DerivedDocType=27066370 AND x.OriginDocType=27066402
+          AND h.CustSupp=:cod AND h.WAPMovementType=2032533505 AND h.CancelPhase1='0' AND h.CancelPhase2='0'
+          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+        OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)}
     # fatture merce del fornitore (contabilità), per PurchaseDocId
     fatture = righe("""SELECT je.CRRefID AS FattId, MAX(pd.DocNo) doc,
             CONVERT(varchar(10),CAST(MIN(g.AccrualDate) AS date),103) data,
@@ -1619,7 +1630,7 @@ def api_riconciliazione_acquisti_forn():
         OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
     mag_by_fid = defaultdict(float); n_bolle = defaultdict(int); nolink = []
     for c in carichi:
-        fid = link.get(c["EntryId"])
+        fid = link.get(c["EntryId"]) or xref.get(c["EntryId"])   # bolla merce o rettifica cambio -> stessa fattura
         if fid is None: nolink.append(c)
         else: mag_by_fid[fid] += fn(c["val"]); n_bolle[fid] += 1
     def riga(doc, data, mag, gl, causa):
