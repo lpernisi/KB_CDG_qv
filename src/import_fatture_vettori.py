@@ -106,69 +106,120 @@ def _leggi_dataframe(contenuto: bytes, nome_file: str):
     return pd.read_csv(io.StringIO(testo), dtype=str, sep=None, engine="python")
 
 
-def parse_righe(contenuto: bytes, nome_file: str) -> list[dict]:
-    """Trasforma il file in una lista di dict pronti per l'INSERT (campi puliti)."""
+def _normalizza(contenuto: bytes, nome_file: str):
+    """Legge il file e rinomina le colonne secondo la mappa (header normalizzato).
+    Verifica le colonne obbligatorie. NON fa parsing riga-per-riga (veloce)."""
     df = _leggi_dataframe(contenuto, nome_file)
-
-    # rinomina colonne secondo la mappa (header normalizzato)
     rename = {}
-    for col in df.columns:
-        chiave = _norm(col)
+    for c in df.columns:
+        chiave = _norm(c)
         if chiave in MAPPA:
-            rename[col] = MAPPA[chiave]
+            rename[c] = MAPPA[chiave]
     df = df.rename(columns=rename)
-
-    obbligatorie = {"anno", "mese", "totale"}
-    mancanti = obbligatorie - set(df.columns)
+    mancanti = {"anno", "mese", "totale"} - set(df.columns)
     if mancanti:
         raise ValueError(
             f"Colonne obbligatorie mancanti nel file: {', '.join(sorted(mancanti))}. "
             f"Intestazioni trovate: {', '.join(str(c) for c in df.columns)}"
         )
+    return df
+
+
+def _num_series(s):
+    """Parsing VETTORIZZATO di importi all'italiana ('€ 2.340,00' -> 2340.00)."""
+    import pandas as pd
+
+    t = (s.astype("string")
+           .str.replace("€", "", regex=False)
+           .str.replace("\xa0", "", regex=False)
+           .str.replace(" ", "", regex=False)
+           .str.replace(".", "", regex=False)
+           .str.replace(",", ".", regex=False))
+    return pd.to_numeric(t, errors="coerce")
+
+
+def parse_righe(contenuto: bytes, nome_file: str) -> list[dict]:
+    """Trasforma il file in una lista di dict pronti per l'INSERT (campi puliti).
+    Tutto VETTORIZZATO (niente to_datetime/regex riga-per-riga): rapido anche su file annuali."""
+    import pandas as pd
+
+    df = _normalizza(contenuto, nome_file)
+    n = len(df)
+
+    def col(name):
+        return df[name] if name in df.columns else pd.Series([None] * n, dtype="object")
+
+    anno   = pd.to_numeric(col("anno"), errors="coerce")
+    mese   = pd.to_numeric(col("mese"), errors="coerce")
+    colli  = _num_series(col("n_colli"))
+    peso   = _num_series(col("peso"))
+    volume = _num_series(col("volume"))
+    nolo   = _num_series(col("nolo"))
+    spese  = _num_series(col("spese_accessorie"))
+    totale = _num_series(col("totale")).fillna(nolo.fillna(0) + spese.fillna(0))
+    data   = pd.to_datetime(col("data_spedizione"), dayfirst=True, errors="coerce")
+
+    def txt(name, up=False, cut=None):
+        s = col(name).astype("string").str.strip()
+        if up:
+            s = s.str.upper()
+        if cut:
+            s = s.str.slice(0, cut)
+        return s
+
+    vettore   = txt("vettore");           destino   = txt("destino")
+    tipo      = txt("tipo_spedizione", up=True)
+    categoria = txt("categoria_cliente", up=True)
+    rif       = txt("rif_ordine");        destinat  = txt("destinatario", cut=160)
+    prov      = txt("prov_destinatario", cut=20)
+    regione   = txt("regione_dest", cut=60); naz    = txt("nazione", cut=60)
 
     righe = []
-    for _, r in df.iterrows():
-        anno = _intero(r.get("anno"))
-        mese = _intero(r.get("mese"))
-        if anno is None or mese is None:
-            continue  # riga senza periodo: salto (di solito righe vuote di coda)
-        nolo = _num(r.get("nolo"))
-        spese = _num(r.get("spese_accessorie"))
-        totale = _num(r.get("totale"))
-        if totale is None:
-            totale = (nolo or 0) + (spese or 0)
+    for i in range(n):
+        a, m = anno.iat[i], mese.iat[i]
+        if pd.isna(a) or pd.isna(m):
+            continue  # riga senza periodo (righe vuote di coda): salto
+        def vs(s):                                   # stringa o None
+            x = s.iat[i]; return None if pd.isna(x) else str(x)
+        def vf(s):                                   # numero o None
+            x = s.iat[i]; return None if pd.isna(x) else float(x)
+        dt = data.iat[i]
         righe.append({
-            "anno": anno, "mese": mese,
-            "vettore": (str(r.get("vettore")).strip() if r.get("vettore") is not None else None),
-            "destino": (str(r.get("destino")).strip() if r.get("destino") is not None else None),
-            "data_spedizione": _data(r.get("data_spedizione")),
-            "tipo_spedizione": (str(r.get("tipo_spedizione")).strip().upper() if r.get("tipo_spedizione") is not None else None),
-            "categoria_cliente": (str(r.get("categoria_cliente")).strip().upper() if r.get("categoria_cliente") is not None else None),
-            "rif_ordine": (str(r.get("rif_ordine")).strip() if r.get("rif_ordine") is not None else None),
-            "destinatario": (str(r.get("destinatario")).strip()[:160] if r.get("destinatario") is not None else None),
-            "prov_destinatario": (str(r.get("prov_destinatario")).strip()[:20] if r.get("prov_destinatario") is not None else None),
-            "regione_dest": (str(r.get("regione_dest")).strip()[:60] if r.get("regione_dest") is not None else None),
-            "nazione": (str(r.get("nazione")).strip()[:60] if r.get("nazione") is not None else None),
-            "n_colli": _intero(r.get("n_colli")),
-            "peso": _num(r.get("peso")),
-            "volume": _num(r.get("volume")),
-            "nolo": nolo,
-            "spese_accessorie": spese,
-            "totale": totale,
+            "anno": int(a), "mese": int(m),
+            "vettore": vs(vettore), "destino": vs(destino),
+            "data_spedizione": (None if pd.isna(dt) else dt.date()),
+            "tipo_spedizione": vs(tipo), "categoria_cliente": vs(categoria),
+            "rif_ordine": vs(rif), "destinatario": vs(destinat),
+            "prov_destinatario": vs(prov), "regione_dest": vs(regione), "nazione": vs(naz),
+            "n_colli": (None if pd.isna(colli.iat[i]) else int(colli.iat[i])),
+            "peso": vf(peso), "volume": vf(volume),
+            "nolo": vf(nolo), "spese_accessorie": vf(spese), "totale": vf(totale),
         })
     return righe
 
 
 def riepilogo(contenuto: bytes, nome_file: str) -> dict:
-    """Legge il file SENZA caricarlo e restituisce i valori disponibili per la scelta
-    (Vettore / Destino / Anno / Mese), come faceva la maschera della solution C#."""
-    righe = parse_righe(contenuto, nome_file)
+    """Legge il file e restituisce SOLO i valori disponibili per la scelta
+    (Vettore / Destino / Anno / Mese), come la maschera della solution C#.
+    Vettorizzato: non costruisce le righe, quindi e' istantaneo anche su file grandi."""
+    import pandas as pd
+
+    df = _normalizza(contenuto, nome_file)
+    anno = pd.to_numeric(df.get("anno"), errors="coerce").dropna().astype(int)
+    mese = pd.to_numeric(df.get("mese"), errors="coerce").dropna().astype(int)
+
+    def uniq(name):
+        if name not in df.columns:
+            return []
+        s = df[name].astype("string").str.strip()
+        return sorted(x for x in s.dropna().unique() if x != "")
+
     return {
-        "righe": len(righe),
-        "vettori": sorted({r["vettore"] for r in righe if r["vettore"]}),
-        "destini": sorted({r["destino"] for r in righe if r["destino"]}),
-        "anni":    sorted({r["anno"] for r in righe}),
-        "mesi":    sorted({r["mese"] for r in righe}),
+        "righe":   int(df.shape[0]),
+        "vettori": uniq("vettore"),
+        "destini": uniq("destino"),
+        "anni":    sorted({int(x) for x in anno.unique()}),
+        "mesi":    sorted({int(x) for x in mese.unique()}),
     }
 
 
