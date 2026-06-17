@@ -1563,46 +1563,62 @@ def api_riconciliazione_acquisti():
 
 @app.get("/api/riconciliazione_acquisti_forn")
 def api_riconciliazione_acquisti_forn():
-    """Drill ACQUISTI per fornitore: i due flussi documento per documento — la MERCE ricevuta a
-    magazzino (bolle/DDT, con data) e le FATTURE registrate in contabilita' (con competenza). Si VEDE
-    lo sfasamento di tempo che genera la differenza. Niente numeri per differenza: ogni riga e' un documento."""
+    """Drill ACQUISTI per fornitore (MERCE): riconciliazione DOCUMENTO PER DOCUMENTO. Ogni FATTURA d'acquisto
+    (contabilità) è appaiata alle sue BOLLE/carichi (magazzino) tramite il legame kodice.carico_fattura, ordinata
+    per valore, con la DIFFERENZA evidenziata e la causa in parole. Le bolle senza fattura nel periodo (ricevuto
+    non ancora fatturato) e le fatture la cui merce è arrivata in un altro periodo restano righe esplicite."""
     anno, mda, ma = _ric_periodo()
     cod = request.args.get("cod", "")
+    from collections import defaultdict
     fn = lambda v: float(v or 0); r = lambda x: round(x, 2)
-    car = righe(f"""SELECT CONVERT(varchar(10),CAST(h.PostingDate AS date),103) data, h.DocNo doc,
-            SUM(CASE WHEN (d.Qty<>0 OR h.InvRsn='ACQ-VALD') THEN {_CONV_EUR} ELSE 0 END) merce,
-            SUM(CASE WHEN d.Qty=0 AND h.InvRsn<>'ACQ-VALD' THEN {_CONV_EUR} ELSE 0 END) oneri
+    # carichi merce del fornitore, per movimento, al valore corretto (stessa base del riepilogo)
+    carichi = righe(f"""SELECT h.EntryId, h.DocNo doc, CONVERT(varchar(10),CAST(h.PostingDate AS date),103) data,
+            SUM(CASE WHEN (d.Qty<>0 OR h.InvRsn='ACQ-VALD') THEN {_CONV_EUR} ELSE 0 END) val
         FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
         JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='PRODOTTO'
         WHERE h.WAPMovementType=2032533505 AND h.CancelPhase1='0' AND h.CancelPhase2='0' AND h.CustSupp=:cod
           AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
-        GROUP BY CAST(h.PostingDate AS date), h.DocNo
-        ORDER BY CAST(h.PostingDate AS date) OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
-    gl = righe("""SELECT CONVERT(varchar(10),CAST(g.AccrualDate AS date),103) data, pd.DocNo doc,
-            SUM(CASE WHEN q.Ruolo='ACQUISTO'       THEN (CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) ELSE 0 END) merce,
-            SUM(CASE WHEN q.Ruolo='ONERE_ACQUISTO' THEN (CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) ELSE 0 END) oneri
+        GROUP BY h.EntryId, h.DocNo, CAST(h.PostingDate AS date)
+        OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
+    link = {x["MovEntryId"]: x["FattId"] for x in
+            righe("SELECT MovEntryId, FattId FROM kodice.carico_fattura WHERE Anno=:a", a=anno)}
+    # fatture merce del fornitore (contabilità), per PurchaseDocId
+    fatture = righe("""SELECT je.CRRefID AS FattId, MAX(pd.DocNo) doc,
+            CONVERT(varchar(10),CAST(MIN(g.AccrualDate) AS date),103) data,
+            SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) gl
         FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
         JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
         JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID
-        WHERE q.Componente='MATERIALE' AND q.Ruolo IN ('ACQUISTO','ONERE_ACQUISTO') AND je.CRRefType=27066402
+        WHERE q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO' AND je.CRRefType=27066402
           AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h AND pd.Supplier=:cod
-        GROUP BY CAST(g.AccrualDate AS date), pd.DocNo
-        ORDER BY CAST(g.AccrualDate AS date) OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
-    out = []
-    for x in car:
-        out.append({"Dove": "Magazzino — merce ricevuta", "Documento": "bolla " + str(x["doc"] or ""),
-            "Data": x["data"], "Merce": r(fn(x["merce"])), "Oneri": r(fn(x["oneri"]))})
-    for x in gl:
-        out.append({"Dove": "Contabilità — fattura registrata", "Documento": str(x["doc"] or ""),
-            "Data": x["data"], "Merce": r(fn(x["merce"])), "Oneri": r(fn(x["oneri"]))})
-    cm = sum(fn(x["merce"]) for x in car); co = sum(fn(x["oneri"]) for x in car)
-    gm = sum(fn(x["merce"]) for x in gl); go = sum(fn(x["oneri"]) for x in gl)
-    out.append({"Dove": "▸ TOTALE Magazzino (CDG)", "Documento": "", "Data": "", "Merce": r(cm), "Oneri": r(co)})
-    out.append({"Dove": "▸ TOTALE Contabilità (Co.Ge.)", "Documento": "", "Data": "", "Merce": r(gm), "Oneri": r(go)})
-    out.append({"Dove": "▸ DIFFERENZA (Co.Ge. − CDG)", "Documento": "sfasamento ricezione/fattura", "Data": "",
-                "Merce": r(gm - cm), "Oneri": r(go - co)})
-    return jsonify(out)
+        GROUP BY je.CRRefID
+        OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
+    mag_by_fid = defaultdict(float); n_bolle = defaultdict(int); nolink = []
+    for c in carichi:
+        fid = link.get(c["EntryId"])
+        if fid is None: nolink.append(c)
+        else: mag_by_fid[fid] += fn(c["val"]); n_bolle[fid] += 1
+    def riga(doc, data, mag, gl, causa):
+        return {"Documento": doc, "Data": data, "Magazzino (CdG)": r(mag),
+                "Contabilità (Co.Ge.)": r(gl), "Differenza": r(gl - mag), "Causa": causa}
+    rows = []; seen = set()
+    for f in fatture:
+        fid = f["FattId"]; seen.add(fid); gl = fn(f["gl"]); mag = mag_by_fid.get(fid, 0.0)
+        if abs(gl - mag) < 0.5:  causa = "quadra ✓"
+        elif mag < 0.5:          causa = "fatturato; merce ricevuta in un altro periodo"
+        else:                    causa = f"differenza di valore / parziale ({n_bolle.get(fid,0)} bolle abbinate)"
+        rows.append(riga("fatt. " + str(f["doc"] or ""), f["data"], mag, gl, causa))
+    for fid, mag in mag_by_fid.items():   # carico agganciato a fattura FUORI periodo
+        if fid in seen: continue
+        rows.append(riga("(carico → fattura fuori periodo)", "", mag, 0.0, "merce ricevuta; fattura fuori periodo"))
+    for c in nolink:                      # carico senza fattura: ricevuto non ancora fatturato
+        rows.append(riga("bolla " + str(c["doc"] or ""), c["data"], fn(c["val"]), 0.0, "ricevuto, non ancora fatturato"))
+    rows.sort(key=lambda x: -max(abs(x["Magazzino (CdG)"]), abs(x["Contabilità (Co.Ge.)"])))
+    tm = sum(x["Magazzino (CdG)"] for x in rows); tg = sum(x["Contabilità (Co.Ge.)"] for x in rows)
+    rows.append({"Documento": "TOTALE", "Data": "", "Magazzino (CdG)": r(tm),
+                 "Contabilità (Co.Ge.)": r(tg), "Differenza": r(tg - tm), "Causa": ""})
+    return jsonify(rows)
 
 
 @app.get("/api/raccordo_proposte")
@@ -2546,12 +2562,22 @@ async function ricDrillAcq(cod,i){
   const d=await j(`/api/riconciliazione_acquisti_forn?anno=${a}&mese_da=1&mese_a=${m}&cod=${encodeURIComponent(cod)}`);
   if(!d || !d.length){ box.innerHTML='<p class="muted">Nessun documento per questo fornitore.</p>'; return; }
   const cols=Object.keys(d[0]);
-  const isEuro=c=>/merce|oneri|valore|differ/i.test(c);
-  const fmt=(c,v)=> (typeof v==='number')?(isEuro(c)?eur(v):num(v)):esc(String(v==null?'':v));
+  const isEuro=c=>/Magazzino|Contabil|Differ|merce|oneri|valore/i.test(c);
   let t=`<table class="sticky"><thead><tr>${cols.map(c=>`<th class="${isEuro(c)?'num':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>`;
-  t+=d.map(rr=>{const tot=String(rr.Dove||'').startsWith('▸');return `<tr style="${tot?'font-weight:700;background:#faf8f2':''}">${cols.map(c=>`<td class="${isEuro(c)?'num':''}">${fmt(c,rr[c])}</td>`).join('')}</tr>`;}).join('');
+  t+=d.map(rr=>{
+    const isTot=String(rr.Documento||'')==='TOTALE';
+    const diff=Number(rr.Differenza||0);
+    const hot=!isTot && Math.abs(diff)>0.5;
+    const bg=isTot?'font-weight:700;background:#faf8f2':(hot?'background:#fdf3f3':'');
+    return `<tr style="${bg}">${cols.map(c=>{
+       let st='';
+       if(c==='Differenza') st = Math.abs(Number(rr[c]||0))>0.5 ? 'color:#b00;font-weight:600' : 'color:#2f7d52';
+       const v=(typeof rr[c]==='number')?(isEuro(c)?eur(rr[c]):num(rr[c])):esc(String(rr[c]==null?'':rr[c]));
+       return `<td class="${isEuro(c)?'num':''}" style="${st}">${v}</td>`;
+    }).join('')}</tr>`;
+  }).join('');
   t+=`</tbody></table>`;
-  box.innerHTML=`<div style="max-height:48vh;overflow:auto">${t}</div>`;
+  box.innerHTML=`<div style="max-height:52vh;overflow:auto">${t}</div>`;
 }
 async function caricaRiconc(){
   const {a,m}=periodo();
