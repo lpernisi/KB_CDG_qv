@@ -38,6 +38,7 @@ def main():
     db.esegui_script(dwh, ROOT / "sql/ddl/01_struttura.sql")
     db.esegui_script(dwh, ROOT / "sql/ddl/02_seed_componenti.sql")
     db.esegui_script(dwh, ROOT / "sql/ddl/03_struttura_trasporti.sql")
+    db.esegui_script(dwh, ROOT / "sql/ddl/04_struttura_commerciali.sql")
 
     # --- 2) (ri)crea tutte le procedure e viste (idempotente) -----------------
     print("[2/5] Creo/aggiorno procedure e viste")
