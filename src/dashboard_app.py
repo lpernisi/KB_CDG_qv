@@ -2259,6 +2259,52 @@ def api_ce():
     return jsonify({"dim": dim, "righe": rows})
 
 
+@app.get("/api/ce_esteso")
+def api_ce_esteso():
+    """Conto Economico ESTESO per TIPO DOCUMENTO: come /api/ce ma con una riga in piu' per i
+    RESI DA CLIENTI (3407877), che NON sono nel fatto base. I resi portano un RECUPERO di materiale
+    (merce che rientra, valorizzata qta x costo certificato, con segno negativo), ricavo 0 e — per ora —
+    trasporto 0 (il rientro vettore va collegato al documento, fase successiva). Il fatto base resta
+    INTATTO: qui i resi sono calcolati al volo e uniti in lettura."""
+    anno = int(request.args.get("anno"))
+    mese = request.args.get("mese")
+    params = {"anno": anno}
+    wmese_f = ""; wmese_r = ""
+    if mese and mese not in ("0", ""):
+        wmese_f = " AND f.mese = :mese"; wmese_r = " AND MONTH(d.DocumentDate) = :mese"; params["mese"] = int(mese)
+    rows = righe(f"""
+        SELECT cat AS dim,
+               SUM(fatturato) AS fatturato, SUM(materiale) AS materiale,
+               SUM(commerciali) AS commerciali, SUM(trasporto) AS trasporto,
+               COUNT(DISTINCT doc) AS n_ordini
+        FROM (
+            -- categorie gia' nel fatto base
+            SELECT {CE_DIMS['tipo_documento']} AS cat, f.sale_doc_id AS doc,
+                   f.ricavo_netto AS fatturato, (f.ricavo_netto - f.mdc1) AS materiale,
+                   (f.mdc1 - f.mdc2) AS commerciali, (f.mdc2 - f.mdc3) AS trasporto
+            FROM core.fatto_riga f
+            JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = f.sale_doc_id
+            WHERE f.anno = :anno {wmese_f}
+            UNION ALL
+            -- RESI da clienti (3407877): recupero materiale (negativo), ricavo 0, trasporto 0
+            SELECT 'Resi da clienti' AS cat, dd.SaleDocId AS doc,
+                   0 AS fatturato,
+                   -(ABS(dd.Qty) * ISNULL(cam.Costo, 0)) AS materiale,
+                   0 AS commerciali, 0 AS trasporto
+            FROM KODICEBAGNO_4.dbo.MA_SaleDoc d
+            JOIN KODICEBAGNO_4.dbo.MA_SaleDocDetail dd ON dd.SaleDocId = d.SaleDocId
+            LEFT JOIN kodice.costi_articolo_mese cam
+                   ON LTRIM(RTRIM(cam.Item)) = LTRIM(RTRIM(dd.Item))
+                  AND cam.Anno = YEAR(d.DocumentDate) AND cam.Mese = MONTH(d.DocumentDate)
+            WHERE d.DocumentType = '3407877' AND YEAR(d.DocumentDate) = :anno {wmese_r}
+        ) x
+        GROUP BY cat
+        ORDER BY CASE cat WHEN 'Ricevuta' THEN 1 WHEN 'Fattura' THEN 2 WHEN 'Accredito' THEN 3
+                          WHEN 'Sostituzione gratuita' THEN 4 WHEN 'Resi da clienti' THEN 5 ELSE 6 END
+    """, **params)
+    return jsonify({"dim": "tipo_documento", "righe": rows})
+
+
 @app.get("/api/ce_drill")
 def api_ce_drill():
     """Drill-down di una riga del CE sul CLIENTE: dato un valore di dimensione (es. Canale='(n/d)'),
@@ -2573,6 +2619,7 @@ PAGINA = r"""<!DOCTYPE html>
   <nav class="side">
     <div class="navg">Conto economico</div>
     <div class="sec" data-s="ce" onclick="sezione('ce')">Riepilogo CE</div>
+    <div class="sec" data-s="ce_esteso" onclick="sezione('ce_esteso')">C.E. esteso (tipo doc)</div>
     <div class="sec on" data-s="ricavi" onclick="sezione('ricavi')">Ricavi</div>
     <div class="sec" data-s="materiali" onclick="sezione('materiali')">Costo dei materiali</div>
     <div class="sec" data-s="commerciali" onclick="sezione('commerciali')">Costi commerciali</div>
@@ -2590,6 +2637,11 @@ PAGINA = r"""<!DOCTYPE html>
     <section id="sec-ce" class="sez-main" style="display:none">
       <h2 class="grp">Conto economico · riepilogo</h2>
       <div id="ce"><p class="muted">Carico…</p></div>
+    </section>
+
+    <section id="sec-ce_esteso" class="sez-main" style="display:none">
+      <h2 class="grp">Conto economico esteso · per tipo documento</h2>
+      <div id="ceEsteso"><p class="muted">Carico…</p></div>
     </section>
 
     <section id="sec-ricavi" class="sez-main">
@@ -2775,6 +2827,7 @@ function sezione(s){
   document.querySelectorAll('.side .sec').forEach(e=>e.classList.toggle('on',e.dataset.s===s));
   document.querySelectorAll('.sez-main').forEach(e=>e.style.display=(e.id==='sec-'+s)?'':'none');
   if(s==='ce') caricaCE();
+  else if(s==='ce_esteso') caricaCEesteso();
   else if(s==='ricavi') cerca();
   else if(s==='materiali'){ aggiornaStatoMese(); sottoVista(SUBV); }
   else if(s==='trasporti') caricaTrasporti();
@@ -3500,6 +3553,38 @@ async function caricaCE(){
     <td class="num">${num(r.n_ordini)}</td></tr>`).join("") || `<tr><td colspan="11" class="muted">Nessun dato.</td></tr>`;
   h+=`</tbody></table></div></div>`;
   $("#ce").innerHTML=h;
+}
+async function caricaCEesteso(){
+  const {a,m}=periodo(); const mm=String(m).padStart(2,'0');
+  const d=await j(`/api/ce_esteso?anno=${a}${CEANNO?'':'&mese='+m}`);
+  const tot=d.righe.reduce((s,r)=>({f:s.f+Number(r.fatturato||0),ma:s.ma+Number(r.materiale||0),co:s.co+Number(r.commerciali||0),tr:s.tr+Number(r.trasporto||0)}),{f:0,ma:0,co:0,tr:0});
+  tot.mg = tot.f - tot.ma - tot.co - tot.tr;
+  const pct=v=>tot.f?(100*v/tot.f).toFixed(1)+'%':'—';
+  let h=`<div class="cards">
+    <div class="kpi"><div class="v">${eur(tot.f)}</div><div class="l">Fatturato</div></div>
+    <div class="kpi"><div class="v">${eur(tot.ma)}</div><div class="l">Materiale (nostro costo)</div></div>
+    <div class="kpi"><div class="v">${eur(tot.mg)}</div><div class="l">Margine</div></div>
+    <div class="kpi"><div class="v">${pct(tot.mg)}</div><div class="l">% Margine</div></div></div>
+  <p class="muted">Periodo: `
+    + `<a href="#" onclick="setCeAnno(false);return false" style="margin:0 4px;${!CEANNO?'font-weight:700;text-decoration:underline':''}">Mese ${a}-${mm}</a>·`
+    + `<a href="#" onclick="setCeAnno(true);return false" style="margin:0 4px;${CEANNO?'font-weight:700;text-decoration:underline':''}">Anno intero ${a}</a>`
+    + `. Stesso dettaglio del C.E., ripartito per <strong>tipo documento</strong>. <strong>Sostituzioni gratuite</strong> (merce regalata): solo costo. <strong>Resi da clienti</strong>: <strong>recupero</strong> di materiale (merce che rientra, valore negativo), ricavo 0; il trasporto di rientro è in lavorazione (va collegato al documento di reso). Il fatto base resta intatto e confrontabile con Qlik: qui i resi sono uniti in lettura.</p>`;
+  h+=`<div class="panel" style="padding:0"><div style="max-height:62vh;overflow:auto"><table class="sticky"><thead><tr>
+    <th>Tipo documento</th><th class="num">Fatturato</th><th class="num">Materiale</th><th class="num">% Mat</th><th class="num">Imballi</th>
+    <th class="num">Trasporto</th><th class="num">Commerciali</th><th class="num">Finanziari</th>
+    <th class="num">Margine</th><th class="num">% Margine</th><th class="num">Nr. Doc</th></tr></thead><tbody>`;
+  h+=`<tr style="font-weight:700;background:#efeae0"><td>Totali</td><td class="num">${eur(tot.f)}</td><td class="num">${eur(tot.ma)}</td>
+    <td class="num">${pct(tot.ma)}</td><td class="num muted">—</td><td class="num">${eur(tot.tr)}</td><td class="num">${eur(tot.co)}</td><td class="num muted">—</td>
+    <td class="num">${eur(tot.mg)}</td><td class="num">${pct(tot.mg)}</td><td class="num"></td></tr>`;
+  h+=d.righe.map(r=>{const mg=Number(r.fatturato)-Number(r.materiale)-Number(r.commerciali)-Number(r.trasporto);
+    return `<tr><td>${esc(r.dim||'(n/d)')}</td>
+    <td class="num">${eur(r.fatturato)}</td><td class="num">${eur(r.materiale)}</td>
+    <td class="num">${Number(r.fatturato)?(100*Number(r.materiale)/Number(r.fatturato)).toFixed(1)+'%':'—'}</td>
+    <td class="num muted">—</td><td class="num">${eur(r.trasporto)}</td><td class="num">${eur(r.commerciali)}</td><td class="num muted">—</td>
+    <td class="num">${eur(mg)}</td><td class="num">${Number(r.fatturato)?(100*mg/Number(r.fatturato)).toFixed(1)+'%':'—'}</td>
+    <td class="num">${num(r.n_ordini)}</td></tr>`;}).join("") || `<tr><td colspan="11" class="muted">Nessun dato.</td></tr>`;
+  h+=`</tbody></table></div></div>`;
+  $("#ceEsteso").innerHTML=h;
 }
 async function ceDrill(el){
   const tr=el.closest('tr'), nxt=tr.nextElementSibling;
