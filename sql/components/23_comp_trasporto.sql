@@ -7,7 +7,7 @@
 -- una marginalita'. Quindi il costo di trasporto di una vendita ha PIU' LIVELLI di stima e
 -- si usa il PIU' ATTENDIBILE DISPONIBILE (cascata):
 --   3) FATTURA del vettore (reale)              -- src.fattura_vettore_riga -> kodice.ordine_documento
---   2) STIMA da listino corriere (alla spedizione) -- FUTURO (slot lasciato nella cascata)
+--   2) STIMA da listino corriere (alla spedizione) -- KB_OrdiniPrelevati.StimaCostoTrasporto (nostro algoritmo)
 --   1) STIMA per fascia di peso (a preventivo)  -- cfg.trasporto_stima_peso, sempre disponibile
 -- Per ogni DOCUMENTO si prende il costo del livello piu' alto presente; il campo 'origine'
 -- registra QUALE livello e' stato usato (tracciabilita').
@@ -63,15 +63,32 @@ BEGIN
                      c.valido_dal DESC
         ) AS t
     ),
-    -- CASCATA: fattura se presente, altrimenti stima per fascia. (Livello 2 listino: futuro.)
+    -- LIVELLO 2: stima da listino corriere (nostro algoritmo) = KB_OrdiniPrelevati.StimaCostoTrasporto
+    -- per ordine, riportata sul documento via il numero ordine. MAX per ordine (collassa i rari
+    -- doppioni di riga), poi somma per documento (un documento puo' avere piu' ordini/spedizioni).
+    liv2 AS (
+        SELECT od.FatturaId AS sale_doc_id, SUM(op.stima) AS costo
+        FROM (
+            SELECT LTRIM(RTRIM(NrOrdine)) AS InternalOrdNo, MAX(StimaCostoTrasporto) AS stima
+            FROM KODICEBAGNO_4.dbo.KB_OrdiniPrelevati
+            WHERE StimaCostoTrasporto > 0
+            GROUP BY LTRIM(RTRIM(NrOrdine))
+        ) AS op
+        JOIN kodice.ordine_documento AS od
+             ON od.InternalOrdNo = op.InternalOrdNo AND od.FatturaId IS NOT NULL
+        GROUP BY od.FatturaId
+    ),
+    -- CASCATA: il piu' attendibile disponibile -> fattura, poi stima listino, poi stima per fascia.
     costo AS (
         SELECT d.sale_doc_id,
-               COALESCE(l3.costo, l1.costo) AS costo,
+               COALESCE(l3.costo, l2.costo, l1.costo) AS costo,
                CASE WHEN l3.costo IS NOT NULL THEN N'Fattura vettore (costo reale)'
+                    WHEN l2.costo IS NOT NULL THEN N'Stima da listino corriere'
                     WHEN l1.costo IS NOT NULL THEN N'Stima per fascia di peso (a preventivo)'
                     ELSE NULL END AS origine
         FROM doc AS d
         LEFT JOIN liv3 AS l3 ON l3.sale_doc_id = d.sale_doc_id
+        LEFT JOIN liv2 AS l2 ON l2.sale_doc_id = d.sale_doc_id
         LEFT JOIN liv1 AS l1 ON l1.sale_doc_id = d.sale_doc_id
     ),
     -- base di riparto = ricavo del documento nel periodo
