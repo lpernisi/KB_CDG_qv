@@ -2261,48 +2261,74 @@ def api_ce():
 
 @app.get("/api/ce_esteso")
 def api_ce_esteso():
-    """Conto Economico ESTESO per TIPO DOCUMENTO: come /api/ce ma con una riga in piu' per i
-    RESI DA CLIENTI (3407877), che NON sono nel fatto base. I resi portano un RECUPERO di materiale
-    (merce che rientra, valorizzata qta x costo certificato, con segno negativo), ricavo 0 e — per ora —
-    trasporto 0 (il rientro vettore va collegato al documento, fase successiva). Il fatto base resta
-    INTATTO: qui i resi sono calcolati al volo e uniti in lettura."""
+    """Conto Economico ESTESO per TIPO DOCUMENTO: come /api/ce + una riga per i RESI DA CLIENTI (3407877),
+    che NON sono nel fatto base. Il RECUPERO materiale dei resi = MERCE EFFETTIVAMENTE RICARICATA a magazzino
+    (movimenti 509, al WAP ricalcolato, solo PRODOTTI) -> coerente con la riconciliazione COGS. Ricavo resi 0,
+    trasporto 0 (rientro da collegare). La merce resa ma NON ricaricata (non conforme) e' esposta come INFO
+    (NON entra nel margine): in futuro potrebbe essere addebitata al trasportatore. Il fatto base resta INTATTO."""
+    fnum = lambda v: float(v or 0)
     anno = int(request.args.get("anno"))
     mese = request.args.get("mese")
     params = {"anno": anno}
-    wmese_f = ""; wmese_r = ""
+    # i movimenti di magazzino (509) e i documenti reso vanno LIMITATI agli stessi mesi del fatto base
+    # (il magazzino corre avanti: ci sono carichi del mese dopo per documenti non ancora caricati).
+    mmax = int(righe("SELECT ISNULL(MAX(mese),12) m FROM core.fatto_riga WHERE anno=:anno", anno=anno)[0]["m"])
+    wmese_f = ""; wmese_h = ""; wmese_r = ""
     if mese and mese not in ("0", ""):
-        wmese_f = " AND f.mese = :mese"; wmese_r = " AND MONTH(d.DocumentDate) = :mese"; params["mese"] = int(mese)
-    rows = righe(f"""
-        SELECT cat AS dim,
-               SUM(fatturato) AS fatturato, SUM(materiale) AS materiale,
-               SUM(commerciali) AS commerciali, SUM(trasporto) AS trasporto,
-               COUNT(DISTINCT doc) AS n_ordini
-        FROM (
-            -- categorie gia' nel fatto base
-            SELECT {CE_DIMS['tipo_documento']} AS cat, f.sale_doc_id AS doc,
-                   f.ricavo_netto AS fatturato, (f.ricavo_netto - f.mdc1) AS materiale,
-                   (f.mdc1 - f.mdc2) AS commerciali, (f.mdc2 - f.mdc3) AS trasporto
-            FROM core.fatto_riga f
-            JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = f.sale_doc_id
-            WHERE f.anno = :anno {wmese_f}
-            UNION ALL
-            -- RESI da clienti (3407877): recupero materiale (negativo), ricavo 0, trasporto 0
-            SELECT 'Resi da clienti' AS cat, dd.SaleDocId AS doc,
-                   0 AS fatturato,
-                   -(ABS(dd.Qty) * ISNULL(cam.Costo, 0)) AS materiale,
-                   0 AS commerciali, 0 AS trasporto
-            FROM KODICEBAGNO_4.dbo.MA_SaleDoc d
-            JOIN KODICEBAGNO_4.dbo.MA_SaleDocDetail dd ON dd.SaleDocId = d.SaleDocId
-            LEFT JOIN kodice.costi_articolo_mese cam
-                   ON LTRIM(RTRIM(cam.Item)) = LTRIM(RTRIM(dd.Item))
-                  AND cam.Anno = YEAR(d.DocumentDate) AND cam.Mese = MONTH(d.DocumentDate)
-            WHERE d.DocumentType = '3407877' AND YEAR(d.DocumentDate) = :anno {wmese_r}
-        ) x
-        GROUP BY cat
-        ORDER BY CASE cat WHEN 'Ricevuta' THEN 1 WHEN 'Fattura' THEN 2 WHEN 'Accredito' THEN 3
-                          WHEN 'Sostituzione gratuita' THEN 4 WHEN 'Resi da clienti' THEN 5 ELSE 6 END
+        params["mese"] = int(mese)
+        wmese_f = " AND f.mese = :mese"
+        wmese_h = " AND MONTH(h.PostingDate) = :mese"
+        wmese_r = " AND MONTH(d.DocumentDate) = :mese"
+    else:
+        params["mmax"] = mmax
+        wmese_h = " AND MONTH(h.PostingDate) BETWEEN 1 AND :mmax"
+        wmese_r = " AND MONTH(d.DocumentDate) BETWEEN 1 AND :mmax"
+    # categorie gia' nel fatto base (Ricevuta/Fattura/Accredito/Sostituzione)
+    base = righe(f"""
+        SELECT {CE_DIMS['tipo_documento']} AS dim,
+               SUM(f.ricavo_netto) AS fatturato, SUM(f.ricavo_netto - f.mdc1) AS materiale,
+               SUM(f.mdc1 - f.mdc2) AS commerciali, SUM(f.mdc2 - f.mdc3) AS trasporto,
+               COUNT(DISTINCT f.sale_doc_id) AS n_ordini
+        FROM core.fatto_riga f JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId = f.sale_doc_id
+        WHERE f.anno = :anno {wmese_f}
+        GROUP BY {CE_DIMS['tipo_documento']}
     """, **params)
-    return jsonify({"dim": "tipo_documento", "righe": rows})
+    ordine = {"Ricevuta": 1, "Fattura": 2, "Accredito": 3, "Sostituzione gratuita": 4}
+    rows = sorted(base, key=lambda r: ordine.get(r["dim"], 8))
+    # RESI: recupero = merce RICARICATA a magazzino (509, WAP ricalcolato, solo PRODOTTI)
+    rec = fnum(righe(f"""
+        SELECT ISNULL(SUM(d.Qty * ISNULL(wr.WAPCost_ricalc,0)),0) v
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId = h.EntryId
+        LEFT JOIN kodice.wap_ricalc wr ON wr.Item = LTRIM(RTRIM(d.Item)) AND wr.Anno = :anno AND wr.Mese = MONTH(h.PostingDate)
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item = LTRIM(RTRIM(d.Item))
+        WHERE h.WAPMovementType = 2032533509 AND ISNULL(ca.Classe,'PRODOTTO') = 'PRODOTTO'
+          AND h.CancelPhase1 = '0' AND h.CancelPhase2 = '0' AND YEAR(h.PostingDate) = :anno {wmese_h}
+    """, **params)[0]["v"])
+    ndoc = righe(f"""SELECT COUNT(DISTINCT d.SaleDocId) n FROM KODICEBAGNO_4.dbo.MA_SaleDoc d
+        WHERE d.DocumentType = '3407877' AND YEAR(d.DocumentDate) = :anno {wmese_r}""", **params)[0]["n"]
+    rows.append({"dim": "Resi da clienti", "fatturato": 0, "materiale": -rec,
+                 "commerciali": 0, "trasporto": 0, "n_ordini": ndoc})
+    # INFO non conforme = valore reso a costo certificato (documenti) - valore ricaricato a costo certificato (509)
+    docval = fnum(righe(f"""
+        SELECT ISNULL(SUM(ABS(dd.Qty)*ISNULL(cam.Costo,0)),0) v
+        FROM KODICEBAGNO_4.dbo.MA_SaleDoc d JOIN KODICEBAGNO_4.dbo.MA_SaleDocDetail dd ON dd.SaleDocId = d.SaleDocId
+        LEFT JOIN kodice.costi_articolo_mese cam ON LTRIM(RTRIM(cam.Item)) = LTRIM(RTRIM(dd.Item))
+             AND cam.Anno = YEAR(d.DocumentDate) AND cam.Mese = MONTH(d.DocumentDate)
+        WHERE d.DocumentType = '3407877' AND YEAR(d.DocumentDate) = :anno {wmese_r}
+    """, **params)[0]["v"])
+    restval = fnum(righe(f"""
+        SELECT ISNULL(SUM(d.Qty*ISNULL(cam.Costo,0)),0) v
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId = h.EntryId
+        LEFT JOIN kodice.costi_articolo_mese cam ON LTRIM(RTRIM(cam.Item)) = LTRIM(RTRIM(d.Item))
+             AND cam.Anno = :anno AND cam.Mese = MONTH(h.PostingDate)
+        LEFT JOIN kodice.vw_classe_articolo ca ON ca.Item = LTRIM(RTRIM(d.Item))
+        WHERE h.WAPMovementType = 2032533509 AND ISNULL(ca.Classe,'PRODOTTO') = 'PRODOTTO'
+          AND h.CancelPhase1 = '0' AND h.CancelPhase2 = '0' AND YEAR(h.PostingDate) = :anno {wmese_h}
+    """, **params)[0]["v"])
+    return jsonify({"dim": "tipo_documento", "righe": rows,
+                    "non_conforme": round(docval - restval, 2)})
 
 
 @app.get("/api/ce_drill")
@@ -3568,7 +3594,7 @@ async function caricaCEesteso(){
   <p class="muted">Periodo: `
     + `<a href="#" onclick="setCeAnno(false);return false" style="margin:0 4px;${!CEANNO?'font-weight:700;text-decoration:underline':''}">Mese ${a}-${mm}</a>·`
     + `<a href="#" onclick="setCeAnno(true);return false" style="margin:0 4px;${CEANNO?'font-weight:700;text-decoration:underline':''}">Anno intero ${a}</a>`
-    + `. Stesso dettaglio del C.E., ripartito per <strong>tipo documento</strong>. <strong>Sostituzioni gratuite</strong> (merce regalata): solo costo. <strong>Resi da clienti</strong>: <strong>recupero</strong> di materiale (merce che rientra, valore negativo), ricavo 0; il trasporto di rientro è in lavorazione (va collegato al documento di reso). Il fatto base resta intatto e confrontabile con Qlik: qui i resi sono uniti in lettura.</p>`;
+    + `. Stesso dettaglio del C.E., ripartito per <strong>tipo documento</strong>. <strong>Sostituzioni gratuite</strong> (merce regalata): solo costo. <strong>Resi da clienti</strong>: <strong>recupero</strong> di materiale = merce <strong>effettivamente ricaricata a magazzino</strong> (al WAP ricalcolato, coerente con la riconciliazione COGS), ricavo 0; trasporto di rientro da collegare (fase successiva). Il fatto base resta intatto e confrontabile con Qlik: qui i resi sono uniti in lettura.</p>`;
   h+=`<div class="panel" style="padding:0"><div style="max-height:62vh;overflow:auto"><table class="sticky"><thead><tr>
     <th>Tipo documento</th><th class="num">Fatturato</th><th class="num">Materiale</th><th class="num">% Mat</th><th class="num">Imballi</th>
     <th class="num">Trasporto</th><th class="num">Commerciali</th><th class="num">Finanziari</th>
@@ -3584,6 +3610,9 @@ async function caricaCEesteso(){
     <td class="num">${eur(mg)}</td><td class="num">${Number(r.fatturato)?(100*mg/Number(r.fatturato)).toFixed(1)+'%':'—'}</td>
     <td class="num">${num(r.n_ordini)}</td></tr>`;}).join("") || `<tr><td colspan="11" class="muted">Nessun dato.</td></tr>`;
   h+=`</tbody></table></div></div>`;
+  if(Number(d.non_conforme)){
+    h+=`<p class="muted" style="margin-top:10px;padding:8px 10px;border:1px dashed var(--line);border-radius:8px">🔧 <strong>Merce resa NON ricaricata a magazzino (non conforme): ${eur(d.non_conforme)}</strong> — <strong>solo informativa, NON nel margine</strong>. È merce resa dal cliente ma non rientrata utilizzabile (probabili non conformità/danni): il costo NON viene recuperato. In una fase futura potrebbe essere addebitata al trasportatore.</p>`;
+  }
   $("#ceEsteso").innerHTML=h;
 }
 async function ceDrill(el){
