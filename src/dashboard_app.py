@@ -1873,11 +1873,14 @@ def api_ce():
     wmese = ""
     if mese and mese not in ("0", ""):
         wmese = " AND f.mese = :mese"; params["mese"] = int(mese)
+    # Esponiamo i COSTI calcolati (materiale = costo del venduto, trasporto = componente
+    # TRASPORTO). Il MARGINE e' un residuo: lo deriva il client per sottrazione
+    # (fatturato - materiale - trasporto), non lo prendiamo "gia' fatto".
     rows = righe(f"""
         SELECT {col} AS dim,
                SUM(f.ricavo_netto)            AS fatturato,
                SUM(f.ricavo_netto - f.mdc1)   AS materiale,
-               SUM(f.mdc1)                    AS margine,
+               SUM(f.mdc2 - f.mdc3)           AS trasporto,
                COUNT(DISTINCT f.sale_doc_id)  AS n_ordini
         {CE_JOINS}
         WHERE f.anno = :anno {wmese}
@@ -1907,7 +1910,7 @@ def api_ce_drill():
                MAX(LTRIM(RTRIM(ctg.Notes)))          AS notes,
                SUM(f.ricavo_netto)            AS fatturato,
                SUM(f.ricavo_netto - f.mdc1)   AS materiale,
-               SUM(f.mdc1)                    AS margine,
+               SUM(f.mdc2 - f.mdc3)           AS trasporto,
                COUNT(DISTINCT f.sale_doc_id)  AS n_ordini
         {CE_JOINS}
         WHERE f.anno = :anno {wmese} AND ({col}) = :val
@@ -2643,7 +2646,8 @@ function setCeAnno(v){ CEANNO=v; caricaCE(); }
 async function caricaCE(){
   const {a,m}=periodo(); const mm=String(m).padStart(2,'0');
   const d=await j(`/api/ce?anno=${a}${CEANNO?'':'&mese='+m}&dim=${CEDIM}`);
-  const tot=d.righe.reduce((s,r)=>({f:s.f+Number(r.fatturato||0),ma:s.ma+Number(r.materiale||0),mg:s.mg+Number(r.margine||0)}),{f:0,ma:0,mg:0});
+  const tot=d.righe.reduce((s,r)=>({f:s.f+Number(r.fatturato||0),ma:s.ma+Number(r.materiale||0),tr:s.tr+Number(r.trasporto||0)}),{f:0,ma:0,tr:0});
+  tot.mg = tot.f - tot.ma - tot.tr;   // Margine = residuo: Fatturato − Materiale − Trasporto
   const pct=v=>tot.f?(100*v/tot.f).toFixed(1)+'%':'0%';
   const dims=[['canale','Canale'],['dipartimento','Dipartimento'],['cliente','Cliente'],['agente','Agente'],['tipo_articolo','Tipo Articolo'],['linea_articolo','Linea Articolo'],['mese','Mese']];
   const etich=dims.find(x=>x[0]===CEDIM)[1];
@@ -2657,21 +2661,21 @@ async function caricaCE(){
     + `<a href="#" onclick="setCeAnno(true);return false" style="margin:0 4px;${CEANNO?'font-weight:700;text-decoration:underline':''}">Anno intero ${a}</a>`
     + ` &nbsp;|&nbsp; Dimensione: `
     + dims.map(x=>`<a href="#" onclick="setCeDim('${x[0]}');return false" style="margin:0 4px;${CEDIM===x[0]?'font-weight:700;text-decoration:underline':''}">${x[1]}</a>`).join('·')
-    + `. <em>Materiale</em> = nostro costo certificato (ricalcolo WAP). Imballi/Trasporto/Commerciali/Finanziari in costruzione (verranno dalle stesse fonti del CE Qlik).</p>`;
+    + `. <em>Materiale</em> = nostro costo certificato (ricalcolo WAP); <em>Trasporto</em> = costo spedizione (fattura vettore o stima); <em>Margine</em> = dopo materiale e trasporto (MdC III). Imballi/Commerciali/Finanziari in costruzione.</p>`;
   h+=`<div class="panel" style="padding:0"><div style="max-height:62vh;overflow:auto"><table class="sticky"><thead><tr>
     <th>${etich}</th><th class="num">Fatturato</th><th class="num">Materiale</th><th class="num">% Mat</th><th class="num">Imballi</th>
     <th class="num">Trasporto</th><th class="num">Commerciali</th><th class="num">Finanziari</th>
     <th class="num">Margine</th><th class="num">% Margine</th><th class="num">Nr. Ordini</th></tr></thead><tbody>`;
   h+=`<tr style="font-weight:700;background:#efeae0"><td>Totali</td><td class="num">${eur(tot.f)}</td><td class="num">${eur(tot.ma)}</td>
-    <td class="num">${pct(tot.ma)}</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>
+    <td class="num">${pct(tot.ma)}</td><td class="num muted">—</td><td class="num">${eur(tot.tr)}</td><td class="num muted">—</td><td class="num muted">—</td>
     <td class="num">${eur(tot.mg)}</td><td class="num">${pct(tot.mg)}</td><td class="num"></td></tr>`;
   h+=d.righe.map(r=>`<tr><td>${CEDIM!=='cliente'
         ? `<a href="#" onclick="ceDrill(this);return false" data-val="${esc(String(r.dim==null?'(n/d)':r.dim)).replace(/"/g,'&quot;')}" title="drill-down sui clienti">${esc(r.dim||'(n/d)')}</a>`
         : esc(r.dim||'(n/d)')}</td>
     <td class="num">${eur(r.fatturato)}</td><td class="num">${eur(r.materiale)}</td>
     <td class="num">${r.fatturato?(100*Number(r.materiale)/Number(r.fatturato)).toFixed(1):'0'}%</td>
-    <td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td><td class="num muted">—</td>
-    <td class="num">${eur(r.margine)}</td><td class="num">${r.fatturato?(100*Number(r.margine)/Number(r.fatturato)).toFixed(1):'0'}%</td>
+    <td class="num muted">—</td><td class="num">${eur(r.trasporto)}</td><td class="num muted">—</td><td class="num muted">—</td>
+    <td class="num">${eur(Number(r.fatturato)-Number(r.materiale)-Number(r.trasporto))}</td><td class="num">${r.fatturato?(100*(Number(r.fatturato)-Number(r.materiale)-Number(r.trasporto))/Number(r.fatturato)).toFixed(1):'0'}%</td>
     <td class="num">${num(r.n_ordini)}</td></tr>`).join("") || `<tr><td colspan="11" class="muted">Nessun dato.</td></tr>`;
   h+=`</tbody></table></div></div>`;
   $("#ce").innerHTML=h;
@@ -2686,14 +2690,15 @@ async function ceDrill(el){
   let inner=`<div style="padding:6px 10px"><strong>${R.length}</strong> clienti in «${esc(val)}»`;
   if(CEDIM==='canale' && val==='(n/d)') inner+=` <span class="muted">— non agganciano alcun canale: manca la categoria cliente o la sua mappatura (Raggrupp_Categorie). La colonna Categoria/Notes mostra il perché.</span>`;
   inner+=`<table style="margin-top:6px"><thead><tr><th>Cliente</th><th>Codice</th><th>Categoria</th><th>Notes (Raggr.)</th>
-     <th class="num">Fatturato</th><th class="num">Materiale</th><th class="num">% Mat</th><th class="num">Margine</th><th class="num">Nr. Ord.</th></tr></thead><tbody>`;
+     <th class="num">Fatturato</th><th class="num">Materiale</th><th class="num">% Mat</th><th class="num">Trasporto</th><th class="num">Margine</th><th class="num">Nr. Ord.</th></tr></thead><tbody>`;
   inner+=R.map(x=>`<tr><td>${esc(x.cliente||'')}</td><td><code>${esc(x.codice||'')}</code></td>
      <td>${x.categoria?esc(x.categoria):'<span class="muted">—</span>'}</td>
      <td>${x.notes?esc(x.notes):'<span class="muted">—</span>'}</td>
      <td class="num">${eur(x.fatturato)}</td><td class="num">${eur(x.materiale)}</td>
      <td class="num">${x.fatturato?(100*Number(x.materiale)/Number(x.fatturato)).toFixed(1):'0'}%</td>
-     <td class="num">${eur(x.margine)}</td><td class="num">${num(x.n_ordini)}</td></tr>`).join("")
-     || `<tr><td colspan="9" class="muted">Nessun cliente.</td></tr>`;
+     <td class="num">${eur(x.trasporto)}</td>
+     <td class="num">${eur(Number(x.fatturato)-Number(x.materiale)-Number(x.trasporto))}</td><td class="num">${num(x.n_ordini)}</td></tr>`).join("")
+     || `<tr><td colspan="10" class="muted">Nessun cliente.</td></tr>`;
   inner+=`</tbody></table></div>`;
   const det=document.createElement('tr'); det.className='cedrill';
   const td=document.createElement('td'); td.colSpan=tr.children.length; td.style.background='#f6f3ec'; td.innerHTML=inner;
