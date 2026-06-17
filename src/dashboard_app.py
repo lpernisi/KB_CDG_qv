@@ -2110,6 +2110,72 @@ def api_ce_drill():
     return jsonify({"dim": dim, "val": val, "righe": rows})
 
 
+@app.get("/api/commerciali")
+def api_commerciali():
+    """COSTI COMMERCIALI (MdC II) del periodo, scomposti nelle 3 voci nominate:
+    commissioni marketplace (PROVVIGIONI), piattaforma marketplace (CHANNEL_ENGINE) e
+    provvigioni agenti (PROVVIGIONI_AGENTI). Il dettaglio e' per CANALE, cosi' si vede
+    su quali marketplace pesano. La riconciliazione vs l'oracolo (Qlik /
+    KB_SaleDocDetailDatiAggiuntivi) e' solo per la validazione."""
+    a = int(request.args.get("anno")); m = int(request.args.get("mese"))
+    canale = CE_DIMS["canale"]
+    # Per canale: ricavo + le 3 voci. Le voci sono aggregate per riga (comp) e agganciate
+    # 1:1 alla riga di fatto, cosi' il ricavo non viene moltiplicato.
+    per_canale = righe(f"""
+        WITH comp AS (
+            SELECT sale_doc_id, line,
+                   SUM(CASE WHEN codice_componente='PROVVIGIONI'        THEN importo ELSE 0 END) AS provvigioni,
+                   SUM(CASE WHEN codice_componente='CHANNEL_ENGINE'     THEN importo ELSE 0 END) AS channel_engine,
+                   SUM(CASE WHEN codice_componente='PROVVIGIONI_AGENTI' THEN importo ELSE 0 END) AS agenti
+            FROM core.componente_riga
+            WHERE anno=:a AND mese=:m
+              AND codice_componente IN ('PROVVIGIONI','CHANNEL_ENGINE','PROVVIGIONI_AGENTI')
+            GROUP BY sale_doc_id, line
+        )
+        SELECT {canale} AS canale,
+               SUM(f.ricavo_netto)                  AS ricavo,
+               SUM(ISNULL(comp.provvigioni,0))      AS provvigioni,
+               SUM(ISNULL(comp.channel_engine,0))   AS channel_engine,
+               SUM(ISNULL(comp.agenti,0))           AS agenti
+        {CE_JOINS}
+        LEFT JOIN comp ON comp.sale_doc_id = f.sale_doc_id AND comp.line = f.line
+        WHERE f.anno=:a AND f.mese=:m
+        GROUP BY {canale}
+        ORDER BY SUM(ISNULL(comp.provvigioni,0)+ISNULL(comp.channel_engine,0)+ISNULL(comp.agenti,0)) DESC,
+                 SUM(f.ricavo_netto) DESC
+    """, a=a, m=m)
+    # Riconciliazione vs oracolo: stesse righe (src), stesso segno del documento.
+    rec = righe("""
+        WITH s AS (
+            SELECT r.sale_doc_id, r.line,
+                   CASE WHEN d.DocumentType='3407876' THEN -1 ELSE 1 END AS seg
+            FROM src.righe_vendita r
+            JOIN KODICEBAGNO_4.dbo.MA_SaleDoc d ON d.SaleDocId=r.sale_doc_id
+            WHERE r.anno=:a AND r.mese=:m
+        )
+        SELECT CAST(SUM(agg.ImportoProvvigioni   * s.seg) AS DECIMAL(18,2)) AS provvigioni,
+               CAST(SUM(agg.CostoChannelENgine   * s.seg) AS DECIMAL(18,2)) AS channel_engine,
+               CAST(SUM(agg.ImpProvvigioniAgenti * s.seg) AS DECIMAL(18,2)) AS agenti
+        FROM s
+        JOIN KODICEBAGNO_4.dbo.KB_SaleDocDetailDatiAggiuntivi agg
+          ON agg.SaleDocId=s.sale_doc_id AND agg.Line=s.line
+    """, a=a, m=m)
+    def f2(x): return round(float(x or 0), 2)
+    tot = {"ricavo":0.0, "provvigioni":0.0, "channel_engine":0.0, "agenti":0.0}
+    out = []
+    for x in per_canale:
+        r = {k: f2(x[k]) for k in ("ricavo","provvigioni","channel_engine","agenti")}
+        r["canale"] = x["canale"]
+        r["commerciali"] = round(r["provvigioni"]+r["channel_engine"]+r["agenti"], 2)
+        for k in tot: tot[k] += r[k]
+        out.append(r)
+    tot = {k: round(v,2) for k,v in tot.items()}
+    tot["commerciali"] = round(tot["provvigioni"]+tot["channel_engine"]+tot["agenti"], 2)
+    orc = rec[0] if rec else {}
+    return jsonify({"anno":a, "mese":m, "righe":out, "totali":tot,
+                    "oracolo":{k:f2(orc.get(k)) for k in ("provvigioni","channel_engine","agenti")}})
+
+
 @app.get("/api/costo_zero")
 def api_costo_zero():
     """MONITOR QUALITA' (permanente): merce VENDUTA nel mese SENZA costo del venduto certificato
@@ -2329,7 +2395,7 @@ PAGINA = r"""<!DOCTYPE html>
     <div class="sec" data-s="ce" onclick="sezione('ce')">Riepilogo CE</div>
     <div class="sec on" data-s="ricavi" onclick="sezione('ricavi')">Ricavi</div>
     <div class="sec" data-s="materiali" onclick="sezione('materiali')">Costo dei materiali</div>
-    <div class="sec todo" data-s="commerciali" onclick="sezione('commerciali')">Costi commerciali</div>
+    <div class="sec" data-s="commerciali" onclick="sezione('commerciali')">Costi commerciali</div>
     <div class="sec" data-s="trasporti" onclick="sezione('trasporti')">Costi di trasporto</div>
     <div class="sec todo" data-s="imballi" onclick="sezione('imballi')">Imballi</div>
     <div class="sec todo" data-s="finanziari" onclick="sezione('finanziari')">Costi finanziari</div>
@@ -2401,7 +2467,7 @@ PAGINA = r"""<!DOCTYPE html>
     </section>
 
     <section id="sec-commerciali" class="sez-main" style="display:none"><h2 class="grp">Costi commerciali</h2>
-      <div class="panel"><p class="muted">🔧 In costruzione — provvigioni e costi variabili di vendita (MdC II): estrazione, attribuzione alla riga, certificazione.</p></div></section>
+      <div id="commerciali"><p class="muted">Carico…</p></div></section>
     <section id="sec-trasporti" class="sez-main" style="display:none"><h2 class="grp">Costi di trasporto</h2>
       <div class="panel">
         <p class="muted">Costo di spedizione <strong>reale</strong> (fatturato dai vettori). Si carica il riepilogativo
@@ -2518,6 +2584,7 @@ function onPeriodo(){ SEL=null; cerca();
   if(SEZ==='ce') caricaCE();
   if(SEZ==='materiali'){ aggiornaStatoMese(); caricaSub(); }
   if(SEZ==='trasporti') caricaTrasporti();
+  if(SEZ==='commerciali') caricaCommerciali();
   if(SEZ==='wap') sottoWap(SUBW);
 }
 function sezione(s){
@@ -2528,8 +2595,52 @@ function sezione(s){
   else if(s==='ricavi') cerca();
   else if(s==='materiali'){ aggiornaStatoMese(); sottoVista(SUBV); }
   else if(s==='trasporti') caricaTrasporti();
+  else if(s==='commerciali') caricaCommerciali();
   else if(s==='wap') sottoWap(SUBW);
   else if(s==='sql') caricaSql();
+}
+async function caricaCommerciali(){
+  const {a,m}=periodo();
+  const d=await j(`/api/commerciali?anno=${a}&mese=${m}`);
+  const T=d.totali||{}; const O=d.oracolo||{};
+  const pc=(v,base)=> base? (v/base*100).toFixed(1).replace('.',',')+'%' : '—';
+  let h=`<p class="muted">Costi <strong>commerciali</strong> del periodo <strong>${a}-${String(m).padStart(2,'0')}</strong> (entrano nel Margine di Contribuzione II). Sono la % di vendita richiesta da ogni canale, scomposta nelle voci che prima erano un'unica percentuale indistinta. Ogni voce è agganciata alla riga di vendita e drill-abile per canale.</p>`;
+  h+=`<div class="banner ok" style="font-size:13.5px;margin-bottom:12px">
+       Totale costi commerciali <strong>${eur(T.commerciali)}</strong> · <strong>${pc(T.commerciali,T.ricavo)}</strong> del fatturato
+       &nbsp;·&nbsp; Commissioni marketplace <strong>${eur(T.provvigioni)}</strong>
+       &nbsp;·&nbsp; Piattaforma marketplace <strong>${eur(T.channel_engine)}</strong>
+       &nbsp;·&nbsp; Provvigioni agenti <strong>${eur(T.agenti)}</strong></div>`;
+  // tabella per canale
+  h+=`<div class="panel"><table><thead><tr>
+       <th>Canale</th><th class="num">Fatturato</th>
+       <th class="num">Commissioni marketplace</th><th class="num">Piattaforma marketplace</th>
+       <th class="num">Provvigioni agenti</th><th class="num">Tot. commerciali</th><th class="num">% su fatturato</th>
+       </tr></thead><tbody>`;
+  (d.righe||[]).forEach(r=>{
+    h+=`<tr><td>${esc(r.canale||'(n/d)')}</td>
+        <td class="num">${eur(r.ricavo)}</td>
+        <td class="num">${eur(r.provvigioni)}</td>
+        <td class="num">${eur(r.channel_engine)}</td>
+        <td class="num">${eur(r.agenti)}</td>
+        <td class="num"><strong>${eur(r.commerciali)}</strong></td>
+        <td class="num">${pc(r.commerciali,r.ricavo)}</td></tr>`;
+  });
+  if(!(d.righe||[]).length) h+=`<tr><td colspan="7" class="muted">Nessun costo commerciale nel periodo.</td></tr>`;
+  h+=`<tr style="border-top:2px solid #ccc;font-weight:600"><td>Totale</td>
+      <td class="num">${eur(T.ricavo)}</td><td class="num">${eur(T.provvigioni)}</td>
+      <td class="num">${eur(T.channel_engine)}</td><td class="num">${eur(T.agenti)}</td>
+      <td class="num">${eur(T.commerciali)}</td><td class="num">${pc(T.commerciali,T.ricavo)}</td></tr>`;
+  h+=`</tbody></table></div>`;
+  // riconciliazione vs oracolo — solo in modalità validazione
+  const dl=(nostro,orc)=>{ const x=(nostro||0)-(orc||0); return `${eur(orc)} <span class="muted">(Δ ${x>=0?'+':''}${eur(x)})</span>`; };
+  h+=`<div class="panel solo-validazione"><h3 style="margin:.2em 0">🔧 Riconciliazione con l'oracolo (Qlik) — stesse righe, stesso segno</h3>
+      <p class="muted" style="margin-top:0">Controllo di validazione: confronto delle nostre voci con i campi storici di <code>KB_SaleDocDetailDatiAggiuntivi</code>. Gli scarti residui delle commissioni sono la quota sul trasporto recuperato (noi sulla riga prodotto, l'oracolo sulla riga di trasporto).</p>
+      <table><thead><tr><th>Voce</th><th class="num">Nostro</th><th class="num">Oracolo (Δ)</th></tr></thead><tbody>
+      <tr><td>Commissioni marketplace</td><td class="num">${eur(T.provvigioni)}</td><td class="num">${dl(T.provvigioni,O.provvigioni)}</td></tr>
+      <tr><td>Piattaforma marketplace (ChannelEngine)</td><td class="num">${eur(T.channel_engine)}</td><td class="num">${dl(T.channel_engine,O.channel_engine)}</td></tr>
+      <tr><td>Provvigioni agenti</td><td class="num">${eur(T.agenti)}</td><td class="num">${dl(T.agenti,O.agenti)}</td></tr>
+      </tbody></table></div>`;
+  $("#commerciali").innerHTML=h;
 }
 async function caricaCosto0(){
   const {a,m}=periodo();
