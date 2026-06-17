@@ -2075,10 +2075,14 @@ def api_trasporto_valid_drill():
     tipo = request.args.get("tipo", "stima")
     if tipo == "stima":
         return jsonify(righe("""
-            WITH nav AS (   -- data di spedizione per documento (via ordine -> stato ordini Mago)
-                SELECT od.FatturaId, MAX(noe.DataSpedizione) AS data_sped
+            WITH nav AS (   -- data di SPEDIZIONE/EVASIONE per documento, via l'ordine. Fonte = DataEvasione
+                -- di KB_OrdiniPrelevati (la stessa della stima listino): coerente e affidabile.
+                -- NB: VwKLStatoOrdini.DataSpedizione e' per lo piu' NULL anche su ordini consegnati -> non si usa.
+                SELECT od.FatturaId, MAX(op.DataEvasione) AS data_sped
                 FROM kodice.ordine_documento od
-                JOIN kodice.vw_ordini_non_evasi noe ON noe.NrOrdine = od.InternalOrdNo
+                JOIN (SELECT LTRIM(RTRIM(NrOrdine)) AS NrOrdine, MAX(DataEvasione) AS DataEvasione
+                      FROM KODICEBAGNO_4.dbo.KB_OrdiniPrelevati GROUP BY LTRIM(RTRIM(NrOrdine))) op
+                  ON op.NrOrdine = od.InternalOrdNo
                 WHERE od.FatturaId IS NOT NULL
                 GROUP BY od.FatturaId
             )
