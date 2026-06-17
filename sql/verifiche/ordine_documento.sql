@@ -37,11 +37,14 @@ CREATE TABLE kodice.ordine_documento (
 GO
 
 CREATE OR ALTER PROCEDURE kodice.usp_build_ordine_documento
-    @Anno smallint
+    @Anno smallint = NULL   -- mantenuto per compatibilita': il raccordo si materializza COMPLETO
 AS
 BEGIN
     SET NOCOUNT ON;
-    DELETE FROM kodice.ordine_documento WHERE Anno = @Anno;
+    -- REBUILD COMPLETO (non per anno): le fatture dei vettori agganciano ordini anche a
+    -- CAVALLO D'ANNO (spedizione di gennaio per un ordine di dicembre). Materializziamo
+    -- l'intero raccordo ordine->documento dall'orizzonte dati del progetto (2024), una volta.
+    DELETE FROM kodice.ordine_documento;
 
     ;WITH ord AS (
         SELECT o.SaleOrdId, LTRIM(RTRIM(o.InternalOrdNo)) AS InternalOrdNo, o.Customer,
@@ -49,7 +52,7 @@ BEGIN
                CAST(o.OrderDate AS date) AS OrderDate
         FROM KODICEBAGNO_4.dbo.MA_SaleOrd o
         LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions co ON co.Customer = o.Customer
-        WHERE YEAR(o.OrderDate) = @Anno
+        WHERE o.OrderDate >= '20240101'
     ),
     cand AS (
         -- B2C: l'ordine web "e'" il documento (InternalOrdNo numerico = SaleDocId)
@@ -86,7 +89,7 @@ BEGIN
     )
     INSERT INTO kodice.ordine_documento
         (Anno, SaleOrdId, InternalOrdNo, Customer, OrderDate, FatturaId, FatturaType, FatturaDate, Modo)
-    SELECT @Anno, ord.SaleOrdId, ord.InternalOrdNo, ord.Customer, ord.OrderDate,
+    SELECT YEAR(ord.OrderDate), ord.SaleOrdId, ord.InternalOrdNo, ord.Customer, ord.OrderDate,
            b.FatturaId, b.FatturaType, b.FatturaDate,
            CASE WHEN b.FatturaId IS NULL THEN 'SENZA_DOC'
                 WHEN ord.InternalOrdNo LIKE '[0-9][0-9]/[0-9]%' THEN 'B2B_DDT'

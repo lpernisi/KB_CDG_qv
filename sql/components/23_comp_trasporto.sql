@@ -93,23 +93,44 @@ BEGIN
         LEFT JOIN liv2 AS l2 ON l2.sale_doc_id = d.sale_doc_id
         LEFT JOIN liv1 AS l1 ON l1.sale_doc_id = d.sale_doc_id
     ),
-    -- base di riparto = ricavo del documento nel periodo
-    base AS (
-        SELECT r.sale_doc_id, SUM(r.ricavo_netto) AS ricavo_doc
+    -- righe del periodo con il PESO di riga (kit esploso, come kodice.vw_doc_trasporto):
+    -- serve come base di riparto alternativa quando il documento non ha ricavo (es. sostituzioni).
+    righe AS (
+        SELECT r.sale_doc_id, r.line, r.ricavo_netto,
+               ABS(r.quantita) * COALESCE(k.peso_kit, g.GrossWeight, 0) AS peso_riga
         FROM src.righe_vendita AS r
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_ItemsGoodsData AS g ON LTRIM(RTRIM(g.Item)) = r.codice_articolo
+        OUTER APPLY (   -- se kit: peso = somma dei componenti esplosi (un livello)
+            SELECT SUM(dd.Qty * ISNULL(gc.GrossWeight, 0)) AS peso_kit
+            FROM kodice.vw_distinta AS dd
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_ItemsGoodsData AS gc ON LTRIM(RTRIM(gc.Item)) = LTRIM(RTRIM(dd.Component))
+            WHERE LTRIM(RTRIM(dd.BOM)) = r.codice_articolo
+        ) AS k
         WHERE r.anno = @anno AND r.mese = @mese
-        GROUP BY r.sale_doc_id
+    ),
+    -- basi di riparto per documento: valore (ricavo), peso, numero di righe
+    base AS (
+        SELECT sale_doc_id,
+               SUM(ricavo_netto) AS ricavo_doc,
+               SUM(peso_riga)    AS peso_doc,
+               COUNT(*)          AS n_righe
+        FROM righe
+        GROUP BY sale_doc_id
     )
     INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
     SELECT
-        r.anno, r.mese, r.sale_doc_id, r.line,
+        @anno, @mese, r.sale_doc_id, r.line,
         N'TRASPORTO',
-        CAST(co.costo * (r.ricavo_netto / NULLIF(b.ricavo_doc, 0)) AS DECIMAL(18,2)) AS importo,
+        -- RIPARTIZIONE A CASCATA: per VALORE (ricavo riga / ricavo doc); se il documento non
+        -- ha ricavo (sostituzioni, merce gratis) per PESO; se manca anche il peso, equa per N. RIGHE.
+        CAST(co.costo *
+             CASE WHEN b.ricavo_doc <> 0 THEN r.ricavo_netto / b.ricavo_doc
+                  WHEN b.peso_doc   <> 0 THEN r.peso_riga    / b.peso_doc
+                  ELSE 1.0 / b.n_righe END
+             AS DECIMAL(18,2)) AS importo,
         co.origine
-    FROM src.righe_vendita AS r
+    FROM righe AS r
     JOIN costo AS co ON co.sale_doc_id = r.sale_doc_id AND co.costo IS NOT NULL
-    JOIN base  AS b  ON b.sale_doc_id  = r.sale_doc_id
-    WHERE r.anno = @anno AND r.mese = @mese
-      AND b.ricavo_doc <> 0;
+    JOIN base  AS b  ON b.sale_doc_id  = r.sale_doc_id;
 END
 GO
