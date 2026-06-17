@@ -2597,26 +2597,53 @@ async function caricaRiconc(){
   const _X=gv('cogs'), _Y=gv('bilancio');
   let h=`<p class="muted">Periodo <strong>${a}</strong> (mesi 1–${m}, progressivo). Riconciliazione tra <strong>COGS calcolato (X)</strong> e <strong>consumo materie a contabilità (Y)</strong>: ogni scarto è una riga spiegata, i drill ▸ sommano al centesimo.</p>`;
   h+=`<div class="banner ok" style="font-size:13.5px;margin-bottom:10px">COGS calcolato <strong>X = ${eur(_X)}</strong> &nbsp;·&nbsp; Consumo contabile <strong>Y = ${eur(_Y)}</strong> &nbsp;·&nbsp; <strong>X − Y = ${eur(_X-_Y)}</strong> &nbsp;→&nbsp; spiegato dalle componenti qui sotto.</div>`;
-  h+=`<div class="row" style="grid-template-columns:1fr 330px">`;
+  h+=`<div class="row" style="grid-template-columns:1fr 440px">`;
   h+=`<div class="panel"><h2>Da COGS (X) a Consumo contabile (Y)</h2><table><tbody>`;
-  (d.righe||[]).forEach(x=>{
+  const righeR=d.righe||[];
+  const byk=k=>righeR.find(x=>x.k===k);
+  // una riga del ponte (gi = indice gruppo per il collasso; null = riga fuori gruppo)
+  const rrow=(x,indent,gi)=>{
+    if(!x) return '';
     const tot=x.tot?'font-weight:700;border-top:2px solid var(--line);background:#faf8f2':'';
     const info=x.perche?`<span class="info" title="${esc(x.perche)}">ⓘ</span>`:'';
-    h+=`<tr class="${x.drill?'drill':''}" style="${tot}" ${x.drill?`onclick="ricDrill('${x.k}')"`:''}>
-        <td>${x.drill?'<span class="muted">▸</span> ':'&nbsp;&nbsp;'}${esc(x.label)} ${info}</td>
+    const cm=(gi!=null)?` grpm_${gi}`:'', cd=(gi!=null)?` grpd_${gi}`:'';
+    const pad=indent?'padding-left:22px;':'';
+    return `<tr class="${x.drill?'drill':''}${cm}" style="${tot}" ${x.drill?`onclick="ricDrill('${x.k}')"`:''}>
+        <td style="${pad}">${x.drill?'<span class="muted">▸</span> ':'&nbsp;&nbsp;'}${esc(x.label)} ${info}</td>
         <td class="num">${eur(x.val)}</td></tr>
-        <tr class="det" id="ricdet_${x.k}" style="display:none"><td colspan="2"><div class="dbox" id="ricbox_${x.k}"></div></td></tr>`;
+        <tr class="det${cd}" id="ricdet_${x.k}" style="display:none"><td colspan="2"><div class="dbox" id="ricbox_${x.k}"></div></td></tr>`;
+  };
+  // PRIMO LIVELLO: voci raggruppate per natura (con sottototale, header collassabile)
+  const GRUPPI=[
+    {nome:'Rimanenze (differenza di valore)', ks:['rim_iniz','rim_fin']},
+    {nome:'Vendite e spedizioni (sfasamenti di competenza)', ks:['uscita_prec','uscita_diff','fatt_nonsped','sost_sped','fba']},
+    {nome:'Rettifiche e resi di magazzino', ks:['resi','rettneg','rettpos']},
+    {nome:'Acquisti (sfasamenti di competenza)', ks:['ricnf_nofatt','ricnf_dopo','ricnf_prec','fatt_carico_dopo','ricnf_oneri','glnodoc']},
+  ];
+  h+=rrow(byk('cogs'),false,null);                       // punto di partenza
+  GRUPPI.forEach((g,gi)=>{
+    const membri=g.ks.map(byk).filter(Boolean);
+    if(!membri.length) return;
+    const sub=membri.reduce((s,x)=>s+Number(x.val||0),0);
+    h+=`<tr class="drill" onclick="ricGruppo(${gi})" style="cursor:pointer;background:#f0ece0;font-weight:700;border-top:1px solid var(--line)">
+        <td><span id="gchev_${gi}">▾</span> ${esc(g.nome)}</td><td class="num">${eur(sub)}</td></tr>`;
+    membri.forEach(x=>{ h+=rrow(x,true,gi); });
   });
+  h+=rrow(byk('spiegato'),false,null)+rrow(byk('non_giust'),false,null)+rrow(byk('bilancio'),false,null);
   h+=`</tbody></table></div>`;
   const imb=d.imballaggi||{};
-  h+=`<div class="panel solo-validazione"><div class="valbadge">🔧 strumento di validazione</div><h2>Dati contabili (raffronto) — solo PRODOTTI</h2><table><tbody>
-      <tr><td>Acquisti (GL 06011000 + oneri)</td><td class="num">${eur(co.acquisti)}</td></tr>
-      <tr><td>+ Rimanenze iniziali (bilancio − imballaggi)</td><td class="num">${eur(co.rim_iniz)}</td></tr>
-      <tr><td>− Rimanenze finali (bilancio − imballaggi)</td><td class="num">${eur(co.rim_fin)}</td></tr>
-      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>= Consumo materie (bilancio)</td><td class="num">${eur(co.consumo)}</td></tr>
+  // DUE SCHEMI AFFIANCATI: stessa identita' (Rim.iniz + Acquisti − Rim.fin = Consumo) per Contabilita' e CDG.
+  const noCons=Number(no.acquisti_carico||0)+Number(no.rim_iniz||0)-Number(no.rim_fin||0);
+  const dlt=(x,y)=>{const v=Number(x||0)-Number(y||0); return `<td class="num" style="${Math.abs(v)>0.5?'color:#b00;font-weight:600':'color:#2f7d52'}">${eur(v)}</td>`;};
+  h+=`<div class="panel solo-validazione"><div class="valbadge">🔧 strumento di validazione</div>
+      <h2>Consumo materie · Contabilità vs CDG <span class="muted" style="font-weight:400">(solo PRODOTTI)</span></h2>
+      <table><thead><tr><th>Voce</th><th class="num">Contabilità</th><th class="num">CDG</th><th class="num">Δ</th></tr></thead><tbody>
+      <tr><td>Rimanenze iniziali</td><td class="num">${eur(co.rim_iniz)}</td><td class="num">${eur(no.rim_iniz)}</td>${dlt(co.rim_iniz,no.rim_iniz)}</tr>
+      <tr><td>+ Acquisti del periodo</td><td class="num">${eur(co.acquisti)}</td><td class="num">${eur(no.acquisti_carico)}</td>${dlt(co.acquisti,no.acquisti_carico)}</tr>
+      <tr><td>− Rimanenze finali</td><td class="num">${eur(co.rim_fin)}</td><td class="num">${eur(no.rim_fin)}</td>${dlt(co.rim_fin,no.rim_fin)}</tr>
+      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>= Consumo di materie</td><td class="num">${eur(co.consumo)}</td><td class="num">${eur(noCons)}</td>${dlt(co.consumo,noCons)}</tr>
       </tbody></table>
-      <p class="muted" style="margin-top:12px;font-size:12px">Rimanenze <strong>nostre</strong> prodotti (ricalcolo): iniz ${eur(no.rim_iniz)} · fin ${eur(no.rim_fin)}<br>Carico merce prodotti nostro: ${eur(no.acquisti_carico)}</p>
-      <div class="banner ok" style="margin-top:10px;font-size:12.5px">Ponte <strong>prodotti-contro-prodotti</strong>: gli imballaggi (ItemType 997) sono esclusi da carico, rimanenze e COGS. Ogni scarto è una <strong>riga spiegata</strong>; validazione implicita del costo del venduto.</div>
+      <div class="banner ok" style="margin-top:10px;font-size:12.5px">Stessa identità sui due lati (<strong>Rim. iniziali + Acquisti − Rim. finali = Consumo</strong>). La colonna Δ mostra dove i due mondi divergono — tipicamente sulle <strong>rimanenze iniziali</strong> (valorizzazione d'apertura). Ponte <strong>prodotti-contro-prodotti</strong> (imballaggi 997 esclusi).</div>
       </div></div>`;
   h+=`<div class="panel" style="margin-top:14px">
       <h2>Imballaggi — contabilità ↔ magazzino, per fornitore</h2>
@@ -2640,6 +2667,13 @@ async function caricaRiconc(){
       </div>`;
   $("#riconc").innerHTML=h;
   caricaRaccordo();
+}
+function ricGruppo(gi){
+  const chev=$('#gchev_'+gi); if(!chev) return;
+  const apri = chev.textContent==='▸';                 // se chiuso -> apri, altrimenti chiudi
+  document.querySelectorAll('.grpm_'+gi).forEach(r=>r.style.display=apri?'':'none');
+  if(!apri) document.querySelectorAll('.grpd_'+gi).forEach(r=>r.style.display='none');  // chiudendo, chiudo anche i drill aperti
+  chev.textContent=apri?'▾':'▸';
 }
 async function caricaRaccordo(){
   const {a,m}=window._ricP;
