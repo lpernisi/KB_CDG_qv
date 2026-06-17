@@ -34,17 +34,52 @@ componenti:
       tipo: costo_certificato
 
   - codice: PROVVIGIONI
-    titolo: Provvigioni marketplace
+    titolo: Commissioni di vendita marketplace
     file_sql: sql/components/21_comp_provvigioni.sql
     sorgente: >-
-      Da definire: tipicamente le fee del marketplace per categoria/canale.
+      Righe di vendita (src.righe_vendita) + la tabella aliquote per canale
+      (kb_TabProvvigioniVendita.CommissioniVendita). Il canale e' la categoria del
+      cliente (MA_CustSuppCustomerOptions.Category), col caso speciale del cliente
+      Bricoman (B2B0415) che usa il proprio codice.
     logica: >-
-      Da definire: provvigione attribuita alla riga in base alla categoria o al canale
-      di vendita. Nel codice e' ancora uno stub da adattare alla sorgente reale.
+      Per ogni riga di MERCE: commissione = aliquota % del canale × imponibile di riga
+      (Amazon 24,36% · Leroy Merlin 14,29% · MANOMANO 19,80% · B2B 4,22% ...). I servizi
+      non pagano commissione. Segno del documento (fatture +, note di credito −). Sulle note
+      di credito-reso la commissione NON si recupera (solo su annullamenti/inevadibili/cambi).
     simulazione:
       tipo: percentuale_ricavo
-      parametro: 0.12
-      nota: Formula DIMOSTRATIVA (12% del ricavo), solo per provare il pannello. Da sostituire.
+      parametro: 0.1841
+      nota: >-
+        L'aliquota REALE dipende dal canale (qui ~18,4% del listino "General/Non Registrati",
+        solo per la simulazione). Il calcolo ufficiale usa l'aliquota del canale della riga.
+
+  - codice: CHANNEL_ENGINE
+    titolo: Piattaforma marketplace (ChannelEngine)
+    file_sql: sql/components/25_comp_channel_engine.sql
+    sorgente: >-
+      Righe di vendita (src.righe_vendita) + aliquote per canale
+      (kb_TabProvvigioniVendita.CostiChannelEngine).
+    logica: >-
+      Costo della piattaforma di integrazione marketplace = aliquota % del canale × imponibile
+      di riga (tipicamente 1,2% sui marketplace, 0 su B2B/canali diretti). Attivo dal 2022-04.
+      Stesse regole di canale/segno/note-di-credito delle commissioni.
+    simulazione:
+      tipo: percentuale_ricavo
+      parametro: 0.012
+      nota: 1,2% sui canali marketplace (0 altrove). Aliquota reale per canale nel calcolo ufficiale.
+
+  - codice: PROVVIGIONI_AGENTI
+    titolo: Provvigioni agenti di vendita
+    file_sql: sql/components/26_comp_provvigioni_agenti.sql
+    sorgente: >-
+      L'importo di provvigione gia' calcolato da Mago per riga
+      (MA_SaleDocDetail.SalespersonComm).
+    logica: >-
+      Non e' una percentuale: e' l'importo di provvigione dell'agente che Mago ha gia' messo
+      sulla riga. Lo prendiamo cosi' com'e', col segno del documento (fatture +, note di credito −).
+    simulazione:
+      tipo: nessuna
+      nota: "Importo gia' pronto in Mago (SalespersonComm): non c'e' una formula da simulare."
 
   - codice: IMBALLI
     titolo: Costi di imballaggio

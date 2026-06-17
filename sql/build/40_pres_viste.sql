@@ -23,7 +23,7 @@ CREATE OR ALTER VIEW pres.componente_riga
 AS
 SELECT
     cr.anno, cr.mese, cr.sale_doc_id, cr.line,
-    cr.codice_componente, c.descrizione, c.livello, c.modo_attacco, c.attivo,
+    cr.codice_componente, c.descrizione, c.gruppo, c.livello, c.modo_attacco, c.attivo,
     cr.importo, cr.origine
 FROM core.componente_riga AS cr
 JOIN cfg.componenti AS c ON c.codice_componente = cr.codice_componente;
@@ -37,7 +37,7 @@ CREATE OR ALTER VIEW pres.controllo_componenti
 AS
 SELECT
     cr.anno, cr.mese,
-    cr.codice_componente, c.descrizione, c.livello, c.attivo,
+    cr.codice_componente, c.descrizione, c.gruppo, c.livello, c.attivo,
     COUNT(*)                                              AS n_righe,
     SUM(CASE WHEN cr.importo IS NULL THEN 1 ELSE 0 END)   AS n_senza_importo,
     CAST(SUM(cr.importo) AS DECIMAL(18,2))                AS totale,
@@ -45,5 +45,5 @@ SELECT
     CAST(MAX(cr.importo) AS DECIMAL(18,2))                AS massimo
 FROM core.componente_riga AS cr
 JOIN cfg.componenti AS c ON c.codice_componente = cr.codice_componente
-GROUP BY cr.anno, cr.mese, cr.codice_componente, c.descrizione, c.livello, c.attivo;
+GROUP BY cr.anno, cr.mese, cr.codice_componente, c.descrizione, c.gruppo, c.livello, c.attivo;
 GO

@@ -90,10 +90,10 @@
   <nav>
     <p class="t">Componenti</p>
     <a href="#test"><span class="dot on"></span><span class="nv-liv liv0">▶</span>Caso di test</a>
-    <a href="#comp-COSTO_VENDUTO"><span class="dot on"></span><span class="nv-liv liv1">I</span>Costo del venduto</a><a href="#comp-PROVVIGIONI"><span class="dot off"></span><span class="nv-liv liv2">II</span>Provvigioni marketplace</a><a href="#comp-IMBALLI"><span class="dot off"></span><span class="nv-liv liv2">II</span>Costi di imballaggio</a><a href="#comp-TRASPORTO"><span class="dot off"></span><span class="nv-liv liv3">III</span>Trasporto / spedizione</a><a href="#comp-PUBBLICITA"><span class="dot off"></span><span class="nv-liv liv3">III</span>Pubblicità / advertising</a>
+    <a href="#comp-COSTO_VENDUTO"><span class="dot on"></span><span class="nv-liv liv1">I</span>Costo del venduto</a><a href="#comp-PROVVIGIONI"><span class="dot on"></span><span class="nv-liv liv2">II</span>Commissioni di vendita marketplace</a><a href="#comp-CHANNEL_ENGINE"><span class="dot on"></span><span class="nv-liv liv2">II</span>Piattaforma marketplace (ChannelEngine)</a><a href="#comp-PROVVIGIONI_AGENTI"><span class="dot on"></span><span class="nv-liv liv2">II</span>Provvigioni agenti di vendita</a><a href="#comp-IMBALLI"><span class="dot off"></span><span class="nv-liv liv2">II</span>Costi di imballaggio</a><a href="#comp-TRASPORTO"><span class="dot on"></span><span class="nv-liv liv3">III</span>Trasporto / spedizione</a><a href="#comp-PUBBLICITA"><span class="dot off"></span><span class="nv-liv liv3">III</span>Pubblicità / advertising</a>
   </nav>
   <main>
-    <div class="banner ok">Spiegazioni allineate al codice: manifest, registro e procedure SQL coincidono.</div>
+    <div class="banner warn"><strong>Disallineamenti da sistemare:</strong><ul><li>TRASPORTO_RESI: nel registro ma SENZA spiegazione nel manifest.</li></ul></div>
 
     <section class="test" id="test">
       <h2>Caso di test</h2>
@@ -166,6 +166,15 @@ BEGIN
     -- JOIN (non LEFT): le righe il cui articolo non ha un costo certificato per il
     -- mese NON producono riga di costo. Sono visibili come ricavo senza costo e,
     -- se anomale, gia&#x27; censite in kodice.costi_eccezioni.
+    --
+    -- REGOLA DI STORNO SULLE NOTE DI CREDITO (vedi docs/estrattore-qlik.md sez. 3-bis;
+    -- fonte gestionale: KODICEBAGNO_4.dbo.Split_Costi_Variabili). Il costo del venduto si
+    -- storna SOLO sulle NC (DocumentType 3407876) con causale Annullato/Inevadibile/Cambio
+    -- documento (InvoicingAccGroup IN &#x27;A&#x27;,&#x27;I&#x27;,&#x27;C&#x27;): li&#x27; la merce di fatto rientra o la vendita
+    -- e&#x27; annullata. Su OGNI ALTRA NC (reso cliente, danno trasporto, difetto fornitore, danno
+    -- logistica, ...) il credito e&#x27; di SOLO PREZZO: la merce resta venduta, quindi il costo NON
+    -- si storna -&gt; per quelle righe non emetto la riga di costo negativa.
+    -- In piu&#x27;: sostituzioni &quot;fotografo&quot; (3407873, ProjectCode=7) -&gt; costo 0 (niente riga).
     INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
     SELECT
         r.anno, r.mese, r.sale_doc_id, r.line,
@@ -177,7 +186,14 @@ BEGIN
          ON LTRIM(RTRIM(k.Item)) = r.codice_articolo   -- TRIM anche lato kodice: robusto agli spazi
         AND k.Anno = r.anno
         AND k.Mese = r.mese
-    WHERE r.anno = @anno AND r.mese = @mese;
+    JOIN KODICEBAGNO_4.dbo.MA_SaleDoc AS doc
+         ON doc.SaleDocId = r.sale_doc_id
+    WHERE r.anno = @anno AND r.mese = @mese
+      -- NC che NON devono stornare il costo: escluse (niente riga di costo)
+      AND NOT ( doc.DocumentType = &#x27;3407876&#x27;
+                AND LTRIM(RTRIM(doc.InvoicingAccGroup)) NOT IN (&#x27;A&#x27;,&#x27;I&#x27;,&#x27;C&#x27;) )
+      -- sostituzioni &quot;fotografo&quot;: costo azzerato
+      AND NOT ( doc.DocumentType = &#x27;3407873&#x27; AND doc.ProjectCode = &#x27;7&#x27; );
 END
 GO
 </code></pre>
@@ -185,21 +201,43 @@ GO
     </section>
     <section class="card liv2" id="comp-PROVVIGIONI">
       <div class="card-head">
-        <h3>Provvigioni marketplace</h3>
-        <div class="pills"><span class="pill liv liv2">Margine II</span><span class="pill off">Inattivo</span><span class="pill segno">costo (−)</span><span class="pill code">PROVVIGIONI</span></div>
+        <h3>Commissioni di vendita marketplace</h3>
+        <div class="pills"><span class="pill liv liv2">Margine II</span><span class="pill on">Attivo</span><span class="pill segno">costo (−)</span><span class="pill code">PROVVIGIONI</span></div>
       </div>
       <div class="spieg">
-        <div><span class="lbl">Da dove prende i dati</span><p>Da definire: tipicamente le fee del marketplace per categoria/canale.</p></div>
-        <div><span class="lbl">Con che logica</span><p>Da definire: provvigione attribuita alla riga in base alla categoria o al canale di vendita. Nel codice e&#x27; ancora uno stub da adattare alla sorgente reale.</p></div>
+        <div><span class="lbl">Da dove prende i dati</span><p>Righe di vendita (src.righe_vendita) + la tabella aliquote per canale (kb_TabProvvigioniVendita.CommissioniVendita). Il canale e&#x27; la categoria del cliente (MA_CustSuppCustomerOptions.Category), col caso speciale del cliente Bricoman (B2B0415) che usa il proprio codice.</p></div>
+        <div><span class="lbl">Con che logica</span><p>Per ogni riga di MERCE: commissione = aliquota % del canale × imponibile di riga (Amazon 24,36% · Leroy Merlin 14,29% · MANOMANO 19,80% · B2B 4,22% ...). I servizi non pagano commissione. Segno del documento (fatture +, note di credito −). Sulle note di credito-reso la commissione NON si recupera (solo su annullamenti/inevadibili/cambi).</p></div>
       </div>
       <details class="codice">
         <summary>Codice realmente eseguito · <code>sql/components/21_comp_provvigioni.sql</code></summary>
         <pre><code>-- =============================================================================
 -- 21_comp_provvigioni.sql  (eseguire su CDG_QV)
 -- -----------------------------------------------------------------------------
--- COMPONENTE: PROVVIGIONI (livello 2) — provvigioni/fee del marketplace.
--- STUB: stessa struttura del costo del venduto, ma la SELECT sorgente e&#x27; tutta
--- da adattare (-- ADATTA). Quando e&#x27; pronta, in cfg.componenti metti attivo = 1.
+-- COMPONENTE: PROVVIGIONI (livello 2, gruppo &quot;Costi commerciali&quot;) —
+--   COMMISSIONI DI VENDITA del marketplace/canale (la voce piu&#x27; grossa dei costi
+--   commerciali). E&#x27; la stessa logica validata della procedura storica
+--   Split_Costi_Variabili (campo ImportoProvvigioni) — vedi
+--   docs/riferimento-split-costi-variabili.md.
+--
+-- LOGICA: per ogni riga di MERCE, commissione = aliquota % del CANALE x ricavo di riga.
+--   - Il CANALE e&#x27; la categoria del cliente (MA_CustSuppCustomerOptions.Category),
+--     con il caso speciale del cliente &#x27;B2B0415&#x27; (Bricoman) che usa il proprio codice.
+--   - L&#x27;aliquota % e&#x27; in kb_TabProvvigioniVendita.CommissioniVendita per categoria
+--     (Amazon 24,36% · Leroy Merlin 14,29% · MANOMANO 19,80% · B2B 4,22% ...).
+--   - BASE = ricavo_netto della riga (imponibile + quota di trasporto recuperato gia&#x27;
+--     spalmata). E&#x27; la scelta corretta: il marketplace applica la commissione sul totale
+--     che paga il cliente, spedizione inclusa; ed e&#x27; coerente con la definizione di ricavo
+--     del CDG. L&#x27;oracolo legacy applicava la % anche alla riga di trasporto: stessa cosa,
+--     qui il trasporto e&#x27; gia&#x27; dentro il ricavo delle righe prodotto.
+--   - I SERVIZI (IsGood=0) non pagano commissione.
+--   - Segno: gia&#x27; dentro ricavo_netto (fatture +, note di credito -).
+--
+-- QUALITA&#x27; (regola del 19.03.2026 dell&#x27;oracolo): sulle NOTE DI CREDITO al cliente (resi)
+--   il marketplace NON restituisce la commissione, quindi NON la recuperiamo; il recupero
+--   vale solo su annullamenti/inevadibili/cambio documento (InvoicingAccGroup A/I/C).
+--
+-- CONTRATTO: DELETE delle proprie righe del periodo + INSERT. Importo col segno del
+--   documento (il -1 del registro lo trasforma in costo). Solo righe con importo &lt;&gt; 0.
 -- =============================================================================
 CREATE OR ALTER PROCEDURE dbo.usp_comp_PROVVIGIONI
     @anno INT, @mese INT
@@ -214,11 +252,141 @@ BEGIN
     SELECT
         r.anno, r.mese, r.sale_doc_id, r.line,
         N&#x27;PROVVIGIONI&#x27;,
-        -- ADATTA: la fee marketplace, tipicamente per categoria/canale.
-        CAST(NULL AS DECIMAL(18,2)) AS importo,
-        N&#x27;-- ADATTA: sorgente provvigioni&#x27; AS origine
+        CAST( provv.CommissioniVendita / 100.0 * r.ricavo_netto AS DECIMAL(18,2)) AS importo,
+        N&#x27;Commissione marketplace &#x27;
+          + REPLACE(CONVERT(NVARCHAR(20), CAST(provv.CommissioniVendita AS DECIMAL(9,2))), N&#x27;.&#x27;, N&#x27;,&#x27;)
+          + N&#x27;% — canale &#x27; + provv.Descrizione AS origine
     FROM src.righe_vendita AS r
-    WHERE r.anno = @anno AND r.mese = @mese;
+    JOIN KODICEBAGNO_4.dbo.MA_SaleDoc AS doc
+         ON doc.SaleDocId = r.sale_doc_id
+    LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions AS opt
+         ON opt.Customer = doc.CustSupp AND opt.CustSuppType = 3211264
+    JOIN KODICEBAGNO_4.dbo.kb_TabProvvigioniVendita AS provv
+         ON provv.CategoriaCliente = CASE WHEN doc.CustSupp = N&#x27;B2B0415&#x27; THEN doc.CustSupp ELSE opt.Category END
+    WHERE r.anno = @anno AND r.mese = @mese
+      AND r.tipo_articolo &lt;&gt; N&#x27;SERVIZIO&#x27;           -- i servizi (IsGood=0) non pagano commissione
+      AND provv.CommissioniVendita &lt;&gt; 0
+      AND r.ricavo_netto &lt;&gt; 0                       -- niente righe a base nulla (es. sostituzioni)
+      -- QUALITA&#x27;: sulle note di credito-reso non si recupera la commissione (solo A/I/C)
+      AND NOT (doc.DocumentType = N&#x27;3407876&#x27; AND doc.InvoicingAccGroup NOT IN (&#x27;A&#x27;,&#x27;I&#x27;,&#x27;C&#x27;));
+END
+GO
+</code></pre>
+      </details>
+    </section>
+    <section class="card liv2" id="comp-CHANNEL_ENGINE">
+      <div class="card-head">
+        <h3>Piattaforma marketplace (ChannelEngine)</h3>
+        <div class="pills"><span class="pill liv liv2">Margine II</span><span class="pill on">Attivo</span><span class="pill segno">costo (−)</span><span class="pill code">CHANNEL_ENGINE</span></div>
+      </div>
+      <div class="spieg">
+        <div><span class="lbl">Da dove prende i dati</span><p>Righe di vendita (src.righe_vendita) + aliquote per canale (kb_TabProvvigioniVendita.CostiChannelEngine).</p></div>
+        <div><span class="lbl">Con che logica</span><p>Costo della piattaforma di integrazione marketplace = aliquota % del canale × imponibile di riga (tipicamente 1,2% sui marketplace, 0 su B2B/canali diretti). Attivo dal 2022-04. Stesse regole di canale/segno/note-di-credito delle commissioni.</p></div>
+      </div>
+      <details class="codice">
+        <summary>Codice realmente eseguito · <code>sql/components/25_comp_channel_engine.sql</code></summary>
+        <pre><code>-- =============================================================================
+-- 25_comp_channel_engine.sql  (eseguire su CDG_QV)
+-- -----------------------------------------------------------------------------
+-- COMPONENTE: CHANNEL_ENGINE (livello 2, gruppo &quot;Costi commerciali&quot;) —
+--   costo della PIATTAFORMA DI INTEGRAZIONE MARKETPLACE (ChannelEngine), una % del
+--   venduto sui canali marketplace. Stessa logica validata dell&#x27;oracolo
+--   (Split_Costi_Variabili, campo CostoChannelEngine) — vedi
+--   docs/riferimento-split-costi-variabili.md.
+--
+-- LOGICA: per ogni riga di MERCE, costo = aliquota % del CANALE x ricavo di riga.
+--   - Aliquota in kb_TabProvvigioniVendita.CostiChannelEngine (tipicamente 1,2% sui
+--     marketplace, 0 su B2B/canali diretti).
+--   - Stessa base (ricavo_netto), canale, segno e regole-NC del componente PROVVIGIONI.
+--   - Parte dal 2022-04-01 (prima il servizio non esisteva): righe precedenti = nessun costo.
+--
+-- CONTRATTO: DELETE delle proprie righe del periodo + INSERT. Solo righe con importo &lt;&gt; 0.
+-- =============================================================================
+CREATE OR ALTER PROCEDURE dbo.usp_comp_CHANNEL_ENGINE
+    @anno INT, @mese INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM core.componente_riga
+    WHERE anno = @anno AND mese = @mese AND codice_componente = N&#x27;CHANNEL_ENGINE&#x27;;
+
+    INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
+    SELECT
+        r.anno, r.mese, r.sale_doc_id, r.line,
+        N&#x27;CHANNEL_ENGINE&#x27;,
+        CAST( provv.CostiChannelEngine / 100.0 * r.ricavo_netto AS DECIMAL(18,2)) AS importo,
+        N&#x27;Piattaforma marketplace (ChannelEngine) &#x27;
+          + REPLACE(CONVERT(NVARCHAR(20), CAST(provv.CostiChannelEngine AS DECIMAL(9,2))), N&#x27;.&#x27;, N&#x27;,&#x27;)
+          + N&#x27;% — canale &#x27; + provv.Descrizione AS origine
+    FROM src.righe_vendita AS r
+    JOIN KODICEBAGNO_4.dbo.MA_SaleDoc AS doc
+         ON doc.SaleDocId = r.sale_doc_id
+    LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions AS opt
+         ON opt.Customer = doc.CustSupp AND opt.CustSuppType = 3211264
+    JOIN KODICEBAGNO_4.dbo.kb_TabProvvigioniVendita AS provv
+         ON provv.CategoriaCliente = CASE WHEN doc.CustSupp = N&#x27;B2B0415&#x27; THEN doc.CustSupp ELSE opt.Category END
+    WHERE r.anno = @anno AND r.mese = @mese
+      AND r.tipo_articolo &lt;&gt; N&#x27;SERVIZIO&#x27;
+      AND provv.CostiChannelEngine &lt;&gt; 0
+      AND r.ricavo_netto &lt;&gt; 0
+      AND doc.DocumentDate &gt;= &#x27;20220401&#x27;            -- ChannelEngine attivo dal 2022-04
+      AND NOT (doc.DocumentType = N&#x27;3407876&#x27; AND doc.InvoicingAccGroup NOT IN (&#x27;A&#x27;,&#x27;I&#x27;,&#x27;C&#x27;));
+END
+GO
+</code></pre>
+      </details>
+    </section>
+    <section class="card liv2" id="comp-PROVVIGIONI_AGENTI">
+      <div class="card-head">
+        <h3>Provvigioni agenti di vendita</h3>
+        <div class="pills"><span class="pill liv liv2">Margine II</span><span class="pill on">Attivo</span><span class="pill segno">costo (−)</span><span class="pill code">PROVVIGIONI_AGENTI</span></div>
+      </div>
+      <div class="spieg">
+        <div><span class="lbl">Da dove prende i dati</span><p>L&#x27;importo di provvigione gia&#x27; calcolato da Mago per riga (MA_SaleDocDetail.SalespersonComm).</p></div>
+        <div><span class="lbl">Con che logica</span><p>Non e&#x27; una percentuale: e&#x27; l&#x27;importo di provvigione dell&#x27;agente che Mago ha gia&#x27; messo sulla riga. Lo prendiamo cosi&#x27; com&#x27;e&#x27;, col segno del documento (fatture +, note di credito −).</p></div>
+      </div>
+      <details class="codice">
+        <summary>Codice realmente eseguito · <code>sql/components/26_comp_provvigioni_agenti.sql</code></summary>
+        <pre><code>-- =============================================================================
+-- 26_comp_provvigioni_agenti.sql  (eseguire su CDG_QV)
+-- -----------------------------------------------------------------------------
+-- COMPONENTE: PROVVIGIONI_AGENTI (livello 2, gruppo &quot;Costi commerciali&quot;) —
+--   provvigioni riconosciute agli AGENTI di vendita (tipicamente sul canale B2B).
+--   Stessa logica validata dell&#x27;oracolo (Split_Costi_Variabili, campo
+--   ImpProvvigioniAgenti) — vedi docs/riferimento-split-costi-variabili.md.
+--
+-- LOGICA: a differenza delle commissioni marketplace NON e&#x27; una %: e&#x27; un IMPORTO gia&#x27;
+--   calcolato da Mago per riga (MA_SaleDocDetail.SalespersonComm). Lo prendiamo cosi&#x27;
+--   com&#x27;e&#x27;, col segno del documento (fatture +, note di credito -). Nessun azzeramento
+--   sulle note di credito (la provvigione agente segue il documento).
+--
+-- CONTRATTO: DELETE delle proprie righe del periodo + INSERT. Solo righe con provvigione &lt;&gt; 0.
+-- =============================================================================
+CREATE OR ALTER PROCEDURE dbo.usp_comp_PROVVIGIONI_AGENTI
+    @anno INT, @mese INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM core.componente_riga
+    WHERE anno = @anno AND mese = @mese AND codice_componente = N&#x27;PROVVIGIONI_AGENTI&#x27;;
+
+    INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
+    SELECT
+        r.anno, r.mese, r.sale_doc_id, r.line,
+        N&#x27;PROVVIGIONI_AGENTI&#x27;,
+        CAST( det.SalespersonComm
+              * CASE WHEN doc.DocumentType = N&#x27;3407876&#x27; THEN -1 ELSE 1 END
+              AS DECIMAL(18,2)) AS importo,
+        N&#x27;Provvigione agente di vendita&#x27; AS origine
+    FROM src.righe_vendita AS r
+    JOIN KODICEBAGNO_4.dbo.MA_SaleDoc AS doc
+         ON doc.SaleDocId = r.sale_doc_id
+    JOIN KODICEBAGNO_4.dbo.MA_SaleDocDetail AS det
+         ON det.SaleDocId = r.sale_doc_id AND det.Line = r.line
+    WHERE r.anno = @anno AND r.mese = @mese
+      AND det.SalespersonComm &lt;&gt; 0;
 END
 GO
 </code></pre>
@@ -267,7 +435,7 @@ GO
     <section class="card liv3" id="comp-TRASPORTO">
       <div class="card-head">
         <h3>Trasporto / spedizione</h3>
-        <div class="pills"><span class="pill liv liv3">Margine III</span><span class="pill off">Inattivo</span><span class="pill segno">costo (−)</span><span class="pill code">TRASPORTO</span></div>
+        <div class="pills"><span class="pill liv liv3">Margine III</span><span class="pill on">Attivo</span><span class="pill segno">costo (−)</span><span class="pill code">TRASPORTO</span></div>
       </div>
       <div class="spieg">
         <div><span class="lbl">Da dove prende i dati</span><p>Da definire: costo vettore dal database &#x27;trasporti&#x27; (KB_FattureVettori).</p></div>
@@ -278,9 +446,25 @@ GO
         <pre><code>-- =============================================================================
 -- 23_comp_trasporto.sql  (eseguire su CDG_QV)
 -- -----------------------------------------------------------------------------
--- COMPONENTE: TRASPORTO (livello 3) — spedizione, allocata per DRIVER (peso/volume),
--- non spalmata a fatturato. Sorgente: DB &#x27;trasporti&#x27; (fatture vettori).
--- STUB: mostra il pattern dell&#x27;allocazione per driver, da completare (-- ADATTA).
+-- COMPONENTE: TRASPORTO (livello 3) — costo di spedizione, nel Margine di Contribuzione III.
+--
+-- Il controllo di gestione non puo&#x27; aspettare la fattura del vettore (fine mese) per dare
+-- una marginalita&#x27;. Quindi il costo di trasporto di una vendita ha PIU&#x27; LIVELLI di stima e
+-- si usa il PIU&#x27; ATTENDIBILE DISPONIBILE (cascata):
+--   3) FATTURA del vettore (reale)              -- src.fattura_vettore_riga -&gt; kodice.ordine_documento
+--   2) STIMA da listino corriere (alla spedizione) -- KB_OrdiniPrelevati.StimaCostoTrasporto (nostro algoritmo)
+--   1) STIMA per fascia di peso (a preventivo)  -- cfg.trasporto_stima_peso, sempre disponibile
+-- Per ogni DOCUMENTO si prende il costo del livello piu&#x27; alto presente; il campo &#x27;origine&#x27;
+-- registra QUALE livello e&#x27; stato usato (tracciabilita&#x27;).
+--
+-- Il costo e&#x27; per DOCUMENTO/spedizione e si RIPARTISCE sulle righe in proporzione al valore:
+--   costo_riga = costo_documento * (ricavo_riga / ricavo_documento).
+-- I RIENTRI (resi/ritiri) sono una voce a parte (logistica resi), non entrano qui.
+--
+-- CONTRATTO: DELETE delle proprie righe del periodo + INSERT. Importo POSITIVO (il segno -1
+-- del registro lo fa sottrarre). PREREQUISITI: per il livello 3, src.fattura_vettore_riga
+-- popolata + kodice.ordine_documento costruita (usp_build_ordine_documento @Anno);
+-- per il livello 1, cfg.trasporto_stima_peso valorizzata + vista kodice.vw_doc_trasporto.
 -- =============================================================================
 CREATE OR ALTER PROCEDURE dbo.usp_comp_TRASPORTO
     @anno INT, @mese INT
@@ -291,18 +475,87 @@ BEGIN
     DELETE FROM core.componente_riga
     WHERE anno = @anno AND mese = @mese AND codice_componente = N&#x27;TRASPORTO&#x27;;
 
-    -- Pattern di allocazione per driver (esempio: peso di riga / peso totale documento):
-    --   costo_trasporto_riga = costo_trasporto_documento * (peso_riga / peso_doc)
-    -- I pesi e il costo vettore vanno presi dalle sorgenti reali (-- ADATTA).
+    ;WITH
+    -- LIVELLO 3: costo REALE per documento = somma &quot;Totale&quot; delle spedizioni in uscita
+    -- agganciate (via numero ordine) a quel documento.
+    liv3 AS (
+        SELECT od.FatturaId AS sale_doc_id, SUM(fvr.totale) AS costo
+        FROM src.fattura_vettore_riga AS fvr
+        JOIN kodice.ordine_documento  AS od ON od.InternalOrdNo = fvr.rif_ordine
+        WHERE fvr.tipo_spedizione = N&#x27;SPEDIZIONE&#x27; AND od.FatturaId IS NOT NULL
+        GROUP BY od.FatturaId
+    ),
+    -- documenti del periodo con peso (kit esplosi) / paese / macro (ITALIA-ESTERO) / canale
+    doc AS (
+        SELECT sale_doc_id, peso_doc, paese, macro, canale, data_doc
+        FROM kodice.vw_doc_trasporto
+        WHERE anno = @anno AND mese = @mese
+    ),
+    -- LIVELLO 1: stima per fascia di peso = riga di config PIU&#x27; SPECIFICA e VALIDA alla data
+    -- del documento. Geografia a CASCATA: Paese specifico -&gt; ESTERO generico -&gt; &#x27;*&#x27; (qualsiasi);
+    -- analogamente il canale esatto batte il jolly &#x27;*&#x27;. A parita&#x27;, vince la valido_dal piu&#x27; recente
+    -- (cosi&#x27; aggiornare la tariffa con una nuova data NON tocca il pregresso).
+    liv1 AS (
+        SELECT d.sale_doc_id, t.costo_eur AS costo
+        FROM doc AS d
+        CROSS APPLY (
+            SELECT TOP 1 c.costo_eur
+            FROM cfg.trasporto_stima_peso AS c
+            WHERE (c.canale = d.canale OR c.canale = N&#x27;*&#x27;)
+              AND (c.area = d.paese OR c.area = d.macro OR c.area = N&#x27;*&#x27;)
+              AND d.peso_doc &gt;= c.peso_da_kg AND d.peso_doc &lt; c.peso_a_kg
+              AND c.valido_dal &lt;= d.data_doc
+            ORDER BY CASE WHEN c.canale = N&#x27;*&#x27; THEN 1 ELSE 0 END,
+                     CASE WHEN c.area = d.paese THEN 0 WHEN c.area = d.macro THEN 1 ELSE 2 END,
+                     c.valido_dal DESC
+        ) AS t
+    ),
+    -- LIVELLO 2: stima da listino corriere (nostro algoritmo) = KB_OrdiniPrelevati.StimaCostoTrasporto
+    -- per ordine, riportata sul documento via il numero ordine. MAX per ordine (collassa i rari
+    -- doppioni di riga), poi somma per documento (un documento puo&#x27; avere piu&#x27; ordini/spedizioni).
+    liv2 AS (
+        SELECT od.FatturaId AS sale_doc_id, SUM(op.stima) AS costo
+        FROM (
+            SELECT LTRIM(RTRIM(NrOrdine)) AS InternalOrdNo, MAX(StimaCostoTrasporto) AS stima
+            FROM KODICEBAGNO_4.dbo.KB_OrdiniPrelevati
+            WHERE StimaCostoTrasporto &gt; 0
+            GROUP BY LTRIM(RTRIM(NrOrdine))
+        ) AS op
+        JOIN kodice.ordine_documento AS od
+             ON od.InternalOrdNo = op.InternalOrdNo AND od.FatturaId IS NOT NULL
+        GROUP BY od.FatturaId
+    ),
+    -- CASCATA: il piu&#x27; attendibile disponibile -&gt; fattura, poi stima listino, poi stima per fascia.
+    costo AS (
+        SELECT d.sale_doc_id,
+               COALESCE(l3.costo, l2.costo, l1.costo) AS costo,
+               CASE WHEN l3.costo IS NOT NULL THEN N&#x27;Fattura vettore (costo reale)&#x27;
+                    WHEN l2.costo IS NOT NULL THEN N&#x27;Stima da listino corriere&#x27;
+                    WHEN l1.costo IS NOT NULL THEN N&#x27;Stima per fascia di peso (a preventivo)&#x27;
+                    ELSE NULL END AS origine
+        FROM doc AS d
+        LEFT JOIN liv3 AS l3 ON l3.sale_doc_id = d.sale_doc_id
+        LEFT JOIN liv2 AS l2 ON l2.sale_doc_id = d.sale_doc_id
+        LEFT JOIN liv1 AS l1 ON l1.sale_doc_id = d.sale_doc_id
+    ),
+    -- base di riparto = ricavo del documento nel periodo
+    base AS (
+        SELECT r.sale_doc_id, SUM(r.ricavo_netto) AS ricavo_doc
+        FROM src.righe_vendita AS r
+        WHERE r.anno = @anno AND r.mese = @mese
+        GROUP BY r.sale_doc_id
+    )
     INSERT INTO core.componente_riga (anno, mese, sale_doc_id, line, codice_componente, importo, origine)
     SELECT
         r.anno, r.mese, r.sale_doc_id, r.line,
         N&#x27;TRASPORTO&#x27;,
-        -- ADATTA: costo vettore del documento * quota driver della riga.
-        CAST(NULL AS DECIMAL(18,2)) AS importo,
-        N&#x27;-- ADATTA: trasporti.dbo.KB_FattureVettori, allocato per driver&#x27; AS origine
+        CAST(co.costo * (r.ricavo_netto / NULLIF(b.ricavo_doc, 0)) AS DECIMAL(18,2)) AS importo,
+        co.origine
     FROM src.righe_vendita AS r
-    WHERE r.anno = @anno AND r.mese = @mese;
+    JOIN costo AS co ON co.sale_doc_id = r.sale_doc_id AND co.costo IS NOT NULL
+    JOIN base  AS b  ON b.sale_doc_id  = r.sale_doc_id
+    WHERE r.anno = @anno AND r.mese = @mese
+      AND b.ricavo_doc &lt;&gt; 0;
 END
 GO
 </code></pre>
@@ -352,7 +605,7 @@ GO
 </div>
 
 <script>
-const DATI = {"componenti": [{"codice": "COSTO_VENDUTO", "titolo": "Costo del venduto", "livello": 1, "segno": -1, "attivo": true, "simulazione": {"tipo": "costo_certificato"}}, {"codice": "PROVVIGIONI", "titolo": "Provvigioni marketplace", "livello": 2, "segno": -1, "attivo": false, "simulazione": {"tipo": "percentuale_ricavo", "parametro": 0.12, "nota": "Formula DIMOSTRATIVA (12% del ricavo), solo per provare il pannello. Da sostituire."}}, {"codice": "IMBALLI", "titolo": "Costi di imballaggio", "livello": 2, "segno": -1, "attivo": false, "simulazione": {"tipo": "per_unita", "parametro": 0.5, "nota": "Formula DIMOSTRATIVA (0,50 € a unita). Da sostituire."}}, {"codice": "TRASPORTO", "titolo": "Trasporto / spedizione", "livello": 3, "segno": -1, "attivo": false, "simulazione": {"tipo": "per_unita", "parametro": 3.0, "nota": "Formula DIMOSTRATIVA (3 € a unita). Da sostituire con l'allocazione per driver."}}, {"codice": "PUBBLICITA", "titolo": "Pubblicità / advertising", "livello": 3, "segno": -1, "attivo": false, "simulazione": {"tipo": "nessuna", "nota": "Logica non ancora definita: non simulabile finche' non e' specificata."}}], "caso": {"_descrizione": "Documento di esempio su cui provare l'estrazione. Modificalo a piacere: righe di vendita + costi certificati (kodice.costi_articolo_mese). La dashboard lo usa come caso di test. ART-C non ha costo certificato: dimostra il caso 'ricavo senza costo' (anomalia da kodice.costi_eccezioni).", "competenza": {"anno": 2026, "mese": 4}, "righe_vendita": [{"line": 1, "codice_articolo": "ART-A", "tipo_articolo": "MERCE", "quantita": 10, "ricavo_netto": 1000.0}, {"line": 2, "codice_articolo": "ART-B", "tipo_articolo": "MERCE", "quantita": 5, "ricavo_netto": 750.0}, {"line": 3, "codice_articolo": "ART-C", "tipo_articolo": "MERCE", "quantita": 4, "ricavo_netto": 400.0}], "costi_articolo": [{"codice_articolo": "ART-A", "anno": 2026, "mese": 4, "costo": 42.0}, {"codice_articolo": "ART-B", "anno": 2026, "mese": 4, "costo": 90.0}]}, "risultati": null};
+const DATI = {"componenti": [{"codice": "COSTO_VENDUTO", "titolo": "Costo del venduto", "livello": 1, "segno": -1, "attivo": true, "simulazione": {"tipo": "costo_certificato"}}, {"codice": "PROVVIGIONI", "titolo": "Commissioni di vendita marketplace", "livello": 2, "segno": -1, "attivo": true, "simulazione": {"tipo": "percentuale_ricavo", "parametro": 0.1841, "nota": "L'aliquota REALE dipende dal canale (qui ~18,4% del listino \"General/Non Registrati\", solo per la simulazione). Il calcolo ufficiale usa l'aliquota del canale della riga."}}, {"codice": "CHANNEL_ENGINE", "titolo": "Piattaforma marketplace (ChannelEngine)", "livello": 2, "segno": -1, "attivo": true, "simulazione": {"tipo": "percentuale_ricavo", "parametro": 0.012, "nota": "1,2% sui canali marketplace (0 altrove). Aliquota reale per canale nel calcolo ufficiale."}}, {"codice": "PROVVIGIONI_AGENTI", "titolo": "Provvigioni agenti di vendita", "livello": 2, "segno": -1, "attivo": true, "simulazione": {"tipo": "nessuna", "nota": "Importo gia' pronto in Mago (SalespersonComm): non c'e' una formula da simulare."}}, {"codice": "IMBALLI", "titolo": "Costi di imballaggio", "livello": 2, "segno": -1, "attivo": false, "simulazione": {"tipo": "per_unita", "parametro": 0.5, "nota": "Formula DIMOSTRATIVA (0,50 € a unita). Da sostituire."}}, {"codice": "TRASPORTO", "titolo": "Trasporto / spedizione", "livello": 3, "segno": -1, "attivo": true, "simulazione": {"tipo": "per_unita", "parametro": 3.0, "nota": "Formula DIMOSTRATIVA (3 € a unita). Da sostituire con l'allocazione per driver."}}, {"codice": "PUBBLICITA", "titolo": "Pubblicità / advertising", "livello": 3, "segno": -1, "attivo": false, "simulazione": {"tipo": "nessuna", "nota": "Logica non ancora definita: non simulabile finche' non e' specificata."}}], "caso": {"_descrizione": "Documento di esempio su cui provare l'estrazione. Modificalo a piacere: righe di vendita + costi certificati (kodice.costi_articolo_mese). La dashboard lo usa come caso di test. ART-C non ha costo certificato: dimostra il caso 'ricavo senza costo' (anomalia da kodice.costi_eccezioni).", "competenza": {"anno": 2026, "mese": 4}, "righe_vendita": [{"line": 1, "codice_articolo": "ART-A", "tipo_articolo": "MERCE", "quantita": 10, "ricavo_netto": 1000.0}, {"line": 2, "codice_articolo": "ART-B", "tipo_articolo": "MERCE", "quantita": 5, "ricavo_netto": 750.0}, {"line": 3, "codice_articolo": "ART-C", "tipo_articolo": "MERCE", "quantita": 4, "ricavo_netto": 400.0}], "costi_articolo": [{"codice_articolo": "ART-A", "anno": 2026, "mese": 4, "costo": 42.0}, {"codice_articolo": "ART-B", "anno": 2026, "mese": 4, "costo": 90.0}]}, "risultati": null};
 const ROMANO = {1:"I",2:"II",3:"III"};
 
 function eur(x){ return (x==null)?"—":x.toLocaleString("it-IT",{minimumFractionDigits:2,maximumFractionDigits:2})+" €"; }

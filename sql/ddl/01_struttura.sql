@@ -60,6 +60,13 @@ BEGIN
 END
 GO
 
+-- gruppo: la VOCE DI PRIMO LIVELLO del Conto Economico a cui appartiene il componente
+-- (es. 'Costi commerciali', 'Costo dei materiali', 'Costi di trasporto'). Serve a
+-- raggruppare piu' componenti drill-abili sotto un'unica voce leggibile dal CEO.
+IF COL_LENGTH(N'cfg.componenti', N'gruppo') IS NULL
+    ALTER TABLE cfg.componenti ADD gruppo NVARCHAR(60) NULL;
+GO
+
 -- ---- CORE: dettaglio per riga e per componente (formato "lungo") -----------
 IF OBJECT_ID(N'core.componente_riga', N'U') IS NULL
 BEGIN
