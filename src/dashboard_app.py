@@ -1482,6 +1482,139 @@ def api_riconciliazione_imb_forn():
     return jsonify(out)
 
 
+# Base di conversione in EUR identica al motore wap_ricalc: LineAmount * Fixing del movimento
+# (valuta estera; per EUR Fixing=0 -> nessuna conversione). Cosi' il carico CDG sta sulla STESSA
+# base della contabilita' e la differenza e' SOLO sfasamento di tempo, non di cambio.
+_CONV_EUR = "d.LineAmount*CASE WHEN h.Currency NOT IN ('','EUR') AND h.Fixing>0 THEN h.Fixing ELSE 1 END"
+
+
+@app.get("/api/riconciliazione_acquisti")
+def api_riconciliazione_acquisti():
+    """VALIDAZIONE ACQUISTI (1ª delle 3 componenti del consumo): Acquisti CDG (carico a magazzino
+    valorizzato, prodotti) vs Acquisti Contabilita' (conto economico). MERCE (righe con quantita') e
+    ONERI accessori (dazi/import, righe a quantita' 0) sono trattati a parte perche' hanno fornitori di
+    NATURA DIVERSA: la merce viene dal venditore, gli oneri dallo spedizioniere/dogana. La MERCE si
+    riconcilia PER FORNITORE (chiave univoca: testata della fattura d'acquisto, lato magazzino il
+    fornitore del carico). Gli ONERI per MESE (è uno sfasamento di allocazione temporale). Stessa base
+    di cambio sui due lati (come wap_ricalc) -> ogni differenza è solo tempo, non valuta."""
+    anno, mda, ma = _ric_periodo()
+    fn = lambda v: float(v or 0); r = lambda x: round(x, 2)
+    # ---- MERCE per fornitore: contabilità (testata fattura d'acquisto) vs carico magazzino (CustSupp) ----
+    rows = righe(f"""
+      WITH glm AS (
+        SELECT pd.Supplier AS CustSupp,
+          SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) gl_merce
+        FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+        JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID
+        WHERE q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO' AND je.CRRefType=27066402
+          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+        GROUP BY pd.Supplier),
+      car AS (
+        SELECT h.CustSupp, SUM(CASE WHEN (d.Qty<>0 OR h.InvRsn='ACQ-VALD') THEN {_CONV_EUR} ELSE 0 END) car_merce
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='PRODOTTO'
+        WHERE h.WAPMovementType=2032533505 AND h.CancelPhase1='0' AND h.CancelPhase2='0'
+          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+        GROUP BY h.CustSupp)
+      SELECT ISNULL(glm.CustSupp,car.CustSupp) cod,
+             ISNULL(cs.CompanyName, ISNULL(glm.CustSupp,car.CustSupp)) fornitore,
+             ISNULL(glm.gl_merce,0) gl_merce, ISNULL(car.car_merce,0) car_merce
+      FROM glm FULL OUTER JOIN car ON car.CustSupp=glm.CustSupp
+      OUTER APPLY (SELECT TOP 1 CompanyName FROM KODICEBAGNO_4.dbo.MA_CustSupp
+                   WHERE CustSupp=ISNULL(glm.CustSupp,car.CustSupp)) cs
+      OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma)
+    forn = []
+    for x in rows:
+        glm_, carm = fn(x["gl_merce"]), fn(x["car_merce"])
+        if abs(glm_) + abs(carm) < 0.005:
+            continue
+        forn.append({"cod": x["cod"], "fornitore": x["fornitore"],
+            "gl": r(glm_), "cdg": r(carm), "diff": r(glm_ - carm)})
+    # MERCE: totali GL completi (per quadrare al centesimo) e carico completo
+    gl_m_full = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
+        FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+        WHERE q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO'
+          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
+    car_m_full = fn(righe(f"""SELECT ISNULL(SUM(CASE WHEN (d.Qty<>0 OR h.InvRsn='ACQ-VALD') THEN {_CONV_EUR} ELSE 0 END),0) v
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='PRODOTTO'
+        WHERE h.WAPMovementType=2032533505 AND h.CancelPhase1='0' AND h.CancelPhase2='0'
+          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
+    s_gl = sum(v["gl"] for v in forn); s_car = sum(v["cdg"] for v in forn)
+    res_gl, res_car = r(gl_m_full - s_gl), r(car_m_full - s_car)
+    if abs(res_gl) > 0.005 or abs(res_car) > 0.005:   # giroconti merce / carico senza fattura d'acquisto
+        forn.append({"cod": None, "fornitore": "(scritture sul conto merce senza fattura d'acquisto — giroconti)",
+            "gl": res_gl, "cdg": res_car, "diff": r(res_gl - res_car)})
+    forn.sort(key=lambda v: -abs(v["diff"]))
+    # ---- ONERI accessori per MESE: contabilità (competenza) vs carico (allocazione) ----
+    glo = righe("""SELECT MONTH(g.AccrualDate) m, ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
+        FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+        WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO'
+          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
+        GROUP BY MONTH(g.AccrualDate)""", a=anno, d=mda, h=ma)
+    caro = righe(f"""SELECT MONTH(h.PostingDate) m, ISNULL(SUM(CASE WHEN d.Qty=0 AND h.InvRsn<>'ACQ-VALD' THEN {_CONV_EUR} ELSE 0 END),0) v
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='PRODOTTO'
+        WHERE h.WAPMovementType=2032533505 AND h.CancelPhase1='0' AND h.CancelPhase2='0'
+          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+        GROUP BY MONTH(h.PostingDate)""", a=anno, d=mda, h=ma)
+    gm = {x["m"]: fn(x["v"]) for x in glo}; cm = {x["m"]: fn(x["v"]) for x in caro}
+    oneri_mesi = [{"mese": mm, "gl": r(gm.get(mm, 0)), "cdg": r(cm.get(mm, 0)), "diff": r(gm.get(mm, 0) - cm.get(mm, 0))}
+                  for mm in range(mda, ma + 1)]
+    o_gl = r(sum(gm.values())); o_car = r(sum(cm.values()))
+    return jsonify({
+        "fornitori": forn, "oneri_mesi": oneri_mesi,
+        "merce": {"gl": r(gl_m_full), "cdg": r(car_m_full), "diff": r(gl_m_full - car_m_full)},
+        "oneri": {"gl": o_gl, "cdg": o_car, "diff": r(o_gl - o_car)},
+        "totale": {"gl": r(gl_m_full + o_gl), "cdg": r(car_m_full + o_car), "diff": r((gl_m_full + o_gl) - (car_m_full + o_car))}})
+
+
+@app.get("/api/riconciliazione_acquisti_forn")
+def api_riconciliazione_acquisti_forn():
+    """Drill ACQUISTI per fornitore: i due flussi documento per documento — la MERCE ricevuta a
+    magazzino (bolle/DDT, con data) e le FATTURE registrate in contabilita' (con competenza). Si VEDE
+    lo sfasamento di tempo che genera la differenza. Niente numeri per differenza: ogni riga e' un documento."""
+    anno, mda, ma = _ric_periodo()
+    cod = request.args.get("cod", "")
+    fn = lambda v: float(v or 0); r = lambda x: round(x, 2)
+    car = righe(f"""SELECT CONVERT(varchar(10),CAST(h.PostingDate AS date),103) data, h.DocNo doc,
+            SUM(CASE WHEN (d.Qty<>0 OR h.InvRsn='ACQ-VALD') THEN {_CONV_EUR} ELSE 0 END) merce,
+            SUM(CASE WHEN d.Qty=0 AND h.InvRsn<>'ACQ-VALD' THEN {_CONV_EUR} ELSE 0 END) oneri
+        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
+        JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
+        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='PRODOTTO'
+        WHERE h.WAPMovementType=2032533505 AND h.CancelPhase1='0' AND h.CancelPhase2='0' AND h.CustSupp=:cod
+          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
+        GROUP BY CAST(h.PostingDate AS date), h.DocNo
+        ORDER BY CAST(h.PostingDate AS date) OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
+    gl = righe("""SELECT CONVERT(varchar(10),CAST(g.AccrualDate AS date),103) data, pd.DocNo doc,
+            SUM(CASE WHEN q.Ruolo='ACQUISTO'       THEN (CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) ELSE 0 END) merce,
+            SUM(CASE WHEN q.Ruolo='ONERE_ACQUISTO' THEN (CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) ELSE 0 END) oneri
+        FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
+        JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID
+        WHERE q.Componente='MATERIALE' AND q.Ruolo IN ('ACQUISTO','ONERE_ACQUISTO') AND je.CRRefType=27066402
+          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h AND pd.Supplier=:cod
+        GROUP BY CAST(g.AccrualDate AS date), pd.DocNo
+        ORDER BY CAST(g.AccrualDate AS date) OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma, cod=cod)
+    out = []
+    for x in car:
+        out.append({"Dove": "Magazzino — merce ricevuta", "Documento": "bolla " + str(x["doc"] or ""),
+            "Data": x["data"], "Merce": r(fn(x["merce"])), "Oneri": r(fn(x["oneri"]))})
+    for x in gl:
+        out.append({"Dove": "Contabilità — fattura registrata", "Documento": str(x["doc"] or ""),
+            "Data": x["data"], "Merce": r(fn(x["merce"])), "Oneri": r(fn(x["oneri"]))})
+    cm = sum(fn(x["merce"]) for x in car); co = sum(fn(x["oneri"]) for x in car)
+    gm = sum(fn(x["merce"]) for x in gl); go = sum(fn(x["oneri"]) for x in gl)
+    out.append({"Dove": "▸ TOTALE Magazzino (CDG)", "Documento": "", "Data": "", "Merce": r(cm), "Oneri": r(co)})
+    out.append({"Dove": "▸ TOTALE Contabilità (Co.Ge.)", "Documento": "", "Data": "", "Merce": r(gm), "Oneri": r(go)})
+    out.append({"Dove": "▸ DIFFERENZA (Co.Ge. − CDG)", "Documento": "sfasamento ricezione/fattura", "Data": "",
+                "Merce": r(gm - cm), "Oneri": r(go - co)})
+    return jsonify(out)
+
+
 @app.get("/api/raccordo_proposte")
 def api_raccordo_proposte():
     """RICERCA CONTRARIA: proposte di aggancio fattura-orfana -> spedizione-senza-fattura, da kodice.raccordo_proposto.
@@ -1920,6 +2053,70 @@ def api_ce_drill():
     return jsonify({"dim": dim, "val": val, "righe": rows})
 
 
+@app.get("/api/costo_zero")
+def api_costo_zero():
+    """MONITOR QUALITA' (permanente): merce VENDUTA nel mese SENZA costo del venduto certificato
+    (ricavo senza costo). Per ogni articolo: ricavo, il costo che Qlik gli attribuisce (raffronto) e una
+    DIAGNOSI della causa: 'kit/articolo con WAP proprio' (costo gia' nel ricalcolo -> ripiego possibile)
+    vs 'componente mancante in distinta' (eccezione aperta). Questi buchi vanno SEMPRE tenuti d'occhio."""
+    a = int(request.args.get("anno")); m = int(request.args.get("mese"))
+    rows = righe("""
+        WITH venduto AS (
+            SELECT f.codice_articolo AS Item,
+                   SUM(f.quantita)              AS qta,
+                   SUM(f.ricavo_netto)          AS ricavo,
+                   SUM(f.ricavo_netto - f.mdc1) AS costo_nostro,           -- COSTO_VENDUTO con segno
+                   SUM(ISNULL(da.costomaterialemensile,0) * CASE WHEN f.quantita < 0 THEN -1 ELSE 1 END) AS costo_qlik
+            FROM core.fatto_riga f
+            LEFT JOIN KODICEBAGNO_4.dbo.KB_SaleDocDetailDatiAggiuntivi da
+                   ON da.SaleDocId = f.sale_doc_id AND da.Line = f.line
+            WHERE f.anno = :a AND f.mese = :m AND f.tipo_articolo = 'MERCE'
+            GROUP BY f.codice_articolo
+        ),
+        zero AS (   -- merce con vendita NETTA positiva ma costo nostro nullo (no rumore note credito)
+            SELECT * FROM venduto WHERE ABS(costo_nostro) <= 0.005 AND qta > 0.0001
+        )
+        SELECT z.Item, it.Description AS descr, z.qta, z.ricavo, z.costo_qlik,
+               own.WAPproprio, ecc.stato, ecc.kit_inc, ecc.costo_manc
+        FROM zero z
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_Items it ON LTRIM(RTRIM(it.Item)) = z.Item
+        OUTER APPLY (   -- ultimo WAP proprio dell'articolo <= competenza (ripiego B1)
+            SELECT TOP 1 wr.WAPCost_ricalc AS WAPproprio
+            FROM kodice.wap_ricalc wr
+            WHERE LTRIM(RTRIM(wr.Item)) = z.Item AND wr.WAPCost_ricalc > 0
+              AND (wr.Anno < :a OR (wr.Anno = :a AND wr.Mese <= :m))
+            ORDER BY wr.Anno DESC, wr.Mese DESC) own
+        OUTER APPLY (   -- eccezioni del motore costi per l'articolo nel mese
+            SELECT MIN(e.Stato) AS stato,
+                   MAX(CASE WHEN e.TipoEccezione = 'KIT_INCOMPLETO' THEN 1 ELSE 0 END) AS kit_inc,
+                   MAX(CASE WHEN e.TipoEccezione = 'COSTO_MANCANTE' THEN 1 ELSE 0 END) AS costo_manc
+            FROM kodice.costi_eccezioni e
+            WHERE LTRIM(RTRIM(e.Item)) = z.Item AND e.Anno = :a AND e.Mese = :m) ecc
+        ORDER BY ABS(z.costo_qlik) DESC, ABS(z.ricavo) DESC
+    """, a=a, m=m)
+    out = []
+    n_wap = n_ecc = 0
+    tot_qlik = 0.0
+    for x in rows:
+        wap = x["WAPproprio"]
+        if wap is not None:
+            diag = "Kit/articolo con WAP proprio — ripiego possibile"; n_wap += 1
+        elif x["kit_inc"] or x["costo_manc"]:
+            diag = "Componente mancante in distinta (eccezione aperta)"; n_ecc += 1
+        else:
+            diag = "Senza costo ricostruibile in SQL"
+        tot_qlik += float(x["costo_qlik"] or 0)
+        out.append({
+            "Item": x["Item"], "descr": x["descr"], "qta": float(x["qta"] or 0),
+            "ricavo": round(float(x["ricavo"] or 0), 2),
+            "costo_qlik": round(float(x["costo_qlik"] or 0), 2),
+            "wap_proprio": (round(float(wap), 2) if wap is not None else None),
+            "stato": x["stato"], "diagnosi": diag})
+    return jsonify({"righe": out, "riepilogo": {
+        "n_articoli": len(out), "n_wap_proprio": n_wap, "n_eccezione": n_ecc,
+        "costo_qlik_mancante": round(tot_qlik, 2)}})
+
+
 @app.get("/api/raffronto_costo")
 def api_raffronto_costo():
     """Raffronto del COSTO MATERIALE del mese, per articolo: nostro vs WAP Mago (risalita) vs
@@ -2075,7 +2272,9 @@ PAGINA = r"""<!DOCTYPE html>
     <div class="sec" data-s="ce" onclick="sezione('ce')">Riepilogo CE</div>
     <div class="sec on" data-s="ricavi" onclick="sezione('ricavi')">Ricavi</div>
     <div class="sec" data-s="materiali" onclick="sezione('materiali')">Costo dei materiali</div>
+    <div class="sec" data-s="costo0" onclick="sezione('costo0')">Articoli a costo 0 🔧</div>
     <div class="sec" data-s="riconc" onclick="sezione('riconc')">Riconciliazione ↔ Co.Ge.</div>
+    <div class="sec" data-s="valacq" onclick="sezione('valacq')">Validazione acquisti</div>
     <div class="sec todo" data-s="commerciali" onclick="sezione('commerciali')">Costi commerciali</div>
     <div class="sec" data-s="trasporti" onclick="sezione('trasporti')">Costi di trasporto</div>
     <div class="sec todo" data-s="imballi" onclick="sezione('imballi')">Imballi</div>
@@ -2110,6 +2309,16 @@ PAGINA = r"""<!DOCTYPE html>
     <section id="sec-riconc" class="sez-main" style="display:none">
       <h2 class="grp">Riconciliazione · costo del venduto CdG ↔ Contabilità</h2>
       <div id="riconc"><p class="muted">Carico…</p></div>
+    </section>
+
+    <section id="sec-valacq" class="sez-main" style="display:none">
+      <h2 class="grp">Validazione acquisti · CdG ↔ Contabilità</h2>
+      <div id="valacq"><p class="muted">Carico…</p></div>
+    </section>
+
+    <section id="sec-costo0" class="sez-main" style="display:none">
+      <h2 class="grp">Articoli a costo 0 · merce venduta senza costo del venduto</h2>
+      <div id="costo0"><p class="muted">Carico…</p></div>
     </section>
 
     <section id="sec-materiali" class="sez-main" style="display:none">
@@ -2251,7 +2460,7 @@ async function init(){
   const h=location.hash.replace('#','');
   if(['qual','bonifica','trend'].includes(h)){ SUBV=h; sezione('materiali'); }
   else if(['anom','costi'].includes(h)){ SUBW=h; sezione('wap'); }
-  else if(['ce','ricavi','materiali','riconc','wap','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
+  else if(['ce','ricavi','materiali','costo0','riconc','valacq','wap','sql','commerciali','trasporti','imballi','finanziari','resi','recuperi'].includes(h)) sezione(h);
   else sezione('ricavi');
   avviaExport();
 }
@@ -2260,6 +2469,8 @@ function onPeriodo(){ SEL=null; cerca();
   if(SEZ==='ce') caricaCE();
   if(SEZ==='materiali'){ aggiornaStatoMese(); caricaSub(); }
   if(SEZ==='riconc') caricaRiconc();
+  if(SEZ==='valacq') caricaValAcq();
+  if(SEZ==='costo0') caricaCosto0();
   if(SEZ==='trasporti') caricaTrasporti();
   if(SEZ==='wap') sottoWap(SUBW);
 }
@@ -2271,9 +2482,86 @@ function sezione(s){
   else if(s==='ricavi') cerca();
   else if(s==='materiali'){ aggiornaStatoMese(); sottoVista(SUBV); }
   else if(s==='riconc') caricaRiconc();
+  else if(s==='valacq') caricaValAcq();
+  else if(s==='costo0') caricaCosto0();
   else if(s==='trasporti') caricaTrasporti();
   else if(s==='wap') sottoWap(SUBW);
   else if(s==='sql') caricaSql();
+}
+async function caricaCosto0(){
+  const {a,m}=periodo();
+  const d=await j(`/api/costo_zero?anno=${a}&mese=${m}`);
+  const R=d.riepilogo||{};
+  let h=`<p class="muted">Merce <strong>venduta</strong> nel periodo <strong>${a}-${String(m).padStart(2,'0')}</strong> a cui il CdG <strong>non</strong> attribuisce un costo del venduto (ricavo senza costo). Controllo di qualità <strong>permanente</strong>: ogni riga è un buco di costo. <em>WAP proprio</em> = costo dell'articolo già disponibile nel nostro ricalcolo (ripiego applicabile); le righe senza WAP proprio sono kit con un componente mancante in distinta. La colonna <em>Costo Qlik</em> è il valore che il CE attuale attribuisce a questi articoli.</p>`;
+  h+=`<div class="banner ${R.n_articoli? 'warn':'ok'}" style="font-size:13.5px;margin-bottom:12px">
+       <strong>${R.n_articoli||0}</strong> articoli a costo 0 · di cui <strong>${R.n_wap_proprio||0}</strong> con WAP proprio (ripiego possibile) e <strong>${R.n_eccezione||0}</strong> con componente mancante · costo che Qlik attribuisce: <strong>${eur(R.costo_qlik_mancante)}</strong></div>`;
+  h+=`<div class="panel"><table><thead><tr><th>Articolo</th><th>Descrizione</th><th class="num">Qtà</th><th class="num">Ricavo</th><th class="num">Costo Qlik</th><th class="num">WAP proprio</th><th>Diagnosi</th></tr></thead><tbody>`;
+  (d.righe||[]).forEach(rr=>{
+    const col = rr.wap_proprio!=null ? 'color:#9a5a1e' : (rr.diagnosi.indexOf('mancante')>=0?'color:#a23b2c':'color:#6f675c');
+    h+=`<tr><td><code>${esc(rr.Item)}</code></td><td>${esc(rr.descr||'')}</td>
+        <td class="num">${(rr.qta||0).toLocaleString('it-IT')}</td>
+        <td class="num">${eur(rr.ricavo)}</td><td class="num">${eur(rr.costo_qlik)}</td>
+        <td class="num">${rr.wap_proprio!=null?eur(rr.wap_proprio):'—'}</td>
+        <td style="${col}">${esc(rr.diagnosi)}</td></tr>`;
+  });
+  if(!(d.righe||[]).length) h+=`<tr><td colspan="7" class="muted">Nessun articolo a costo 0 nel periodo. 🎉</td></tr>`;
+  h+=`</tbody></table></div>`;
+  $("#costo0").innerHTML=h;
+}
+async function caricaValAcq(){
+  const {a,m}=periodo();
+  window._ricP={a,m};
+  const d=await j(`/api/riconciliazione_acquisti?anno=${a}&mese_da=1&mese_a=${m}`);
+  const M=d.merce||{}, O=d.oneri||{}, T=d.totale||{};
+  const cell=o=>`CdG <strong>${eur(o.cdg)}</strong> · Co.Ge. <strong>${eur(o.gl)}</strong> · diff <strong>${eur(o.diff)}</strong>`;
+  let h=`<p class="muted">Periodo <strong>${a}</strong> (mesi 1–${m}, progressivo). Prima delle <strong>tre componenti</strong> del consumo materie: <strong>Acquisti CdG</strong> (carico a magazzino valorizzato, solo prodotti) contro <strong>Acquisti in contabilità</strong>. Stessa base di cambio sui due lati → ogni differenza è solo <strong>sfasamento di tempo</strong>, non di valuta.</p>`;
+  h+=`<div class="banner ok" style="font-size:13.5px;margin-bottom:12px"><strong>Merce</strong>: ${cell(M)} &nbsp;|&nbsp; <strong>Oneri (dazi/import)</strong>: ${cell(O)} &nbsp;|&nbsp; <strong>Totale acquisti</strong>: ${cell(T)}</div>`;
+  // MERCE per fornitore (clic -> documenti)
+  h+=`<div class="panel"><h2>Merce, per fornitore — clicca una riga per i documenti (bolle ricevute ↔ fatture registrate)</h2>
+      <table><thead><tr><th>Fornitore</th><th class="num">Magazzino (CdG)</th><th class="num">Contabilità (Co.Ge.)</th><th class="num">Differenza</th></tr></thead><tbody>`;
+  (d.fornitori||[]).forEach((rr,i)=>{
+    const onc = rr.cod ? `class="drill" onclick="ricDrillAcq('${esc(rr.cod)}',${i})"` : '';
+    const dc = Math.abs(rr.diff||0)>0.005 ? 'color:#b00;font-weight:600' : 'color:#2f7d52';
+    h+=`<tr ${onc}><td>${rr.cod?'▸ ':'&nbsp;&nbsp;'}${esc(rr.fornitore)}</td>
+         <td class="num">${eur(rr.cdg)}</td><td class="num">${eur(rr.gl)}</td>
+         <td class="num" style="${dc}">${eur(rr.diff)}</td></tr>
+        <tr><td colspan="4" style="padding:0"><div id="ricdet_acq_${i}" style="display:none;margin:4px 0"><div class="dbox" id="ricbox_acq_${i}"></div></div></td></tr>`;
+  });
+  h+=`<tr style="font-weight:700;border-top:2px solid var(--line);background:#faf8f2"><td>TOTALE MERCE</td>
+       <td class="num">${eur(M.cdg)}</td><td class="num">${eur(M.gl)}</td><td class="num">${eur(M.diff)}</td></tr></tbody></table>
+      <div class="banner" style="margin-top:10px;font-size:12px;background:#eef5ee;border:1px solid #bfe0cb;padding:8px 10px;border-radius:6px">
+        Differenza minima (≈0,1%): <strong>sfasamento bolla→fattura</strong> — merce ricevuta in un mese e fatturata in un altro a cavallo del periodo. Drill: vedi bolle e fatture con le date.</div>
+      </div>`;
+  // ONERI per mese
+  h+=`<div class="panel" style="margin-top:14px"><h2>Oneri accessori di importazione (dazi, noli, dogana), per mese</h2>
+      <p class="muted">Hanno fornitori di natura diversa (spedizionieri/dogana, non chi vende la merce): qui contano come <strong>sfasamento di allocazione temporale</strong> — registrati in contabilità per competenza, ribaltati sui carichi quando si chiude la pratica di import.</p>
+      <table><thead><tr><th>Mese</th><th class="num">Caricato a magazzino (CdG)</th><th class="num">Registrato in contabilità (Co.Ge.)</th><th class="num">Differenza</th></tr></thead><tbody>`;
+  (d.oneri_mesi||[]).forEach(rr=>{
+    const dc = Math.abs(rr.diff||0)>0.005 ? 'color:#b00;font-weight:600' : 'color:#2f7d52';
+    h+=`<tr><td>${rr.mese}</td><td class="num">${eur(rr.cdg)}</td><td class="num">${eur(rr.gl)}</td><td class="num" style="${dc}">${eur(rr.diff)}</td></tr>`;
+  });
+  h+=`<tr style="font-weight:700;border-top:2px solid var(--line);background:#faf8f2"><td>TOTALE ONERI</td>
+       <td class="num">${eur(O.cdg)}</td><td class="num">${eur(O.gl)}</td><td class="num">${eur(O.diff)}</td></tr></tbody></table>
+      <div class="banner" style="margin-top:10px;font-size:12px;background:#fbf6e7;border:1px solid #e0c97a;padding:8px 10px;border-radius:6px">
+        La differenza si concentra a fine periodo: gli oneri di importazione registrati in contabilità non sono ancora stati ribaltati sui carichi (taglio di valorizzazione ad aprile). Si chiude man mano che le pratiche import vengono caricate.</div>
+      </div>`;
+  $("#valacq").innerHTML=h;
+}
+async function ricDrillAcq(cod,i){
+  const row=document.getElementById('ricdet_acq_'+i), box=document.getElementById('ricbox_acq_'+i);
+  if(!row) return;
+  if(row.style.display!=='none'){ row.style.display='none'; return; }
+  row.style.display=''; box.innerHTML='<p class="muted">Carico…</p>';
+  const {a,m}=window._ricP;
+  const d=await j(`/api/riconciliazione_acquisti_forn?anno=${a}&mese_da=1&mese_a=${m}&cod=${encodeURIComponent(cod)}`);
+  if(!d || !d.length){ box.innerHTML='<p class="muted">Nessun documento per questo fornitore.</p>'; return; }
+  const cols=Object.keys(d[0]);
+  const isEuro=c=>/merce|oneri|valore|differ/i.test(c);
+  const fmt=(c,v)=> (typeof v==='number')?(isEuro(c)?eur(v):num(v)):esc(String(v==null?'':v));
+  let t=`<table class="sticky"><thead><tr>${cols.map(c=>`<th class="${isEuro(c)?'num':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>`;
+  t+=d.map(rr=>{const tot=String(rr.Dove||'').startsWith('▸');return `<tr style="${tot?'font-weight:700;background:#faf8f2':''}">${cols.map(c=>`<td class="${isEuro(c)?'num':''}">${fmt(c,rr[c])}</td>`).join('')}</tr>`;}).join('');
+  t+=`</tbody></table>`;
+  box.innerHTML=`<div style="max-height:48vh;overflow:auto">${t}</div>`;
 }
 async function caricaRiconc(){
   const {a,m}=periodo();
