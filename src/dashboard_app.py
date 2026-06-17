@@ -2612,8 +2612,9 @@ async function caricaCommerciali(){
        &nbsp;·&nbsp; Commissioni marketplace <strong>${eur(T.provvigioni)}</strong>
        &nbsp;·&nbsp; Piattaforma marketplace <strong>${eur(T.channel_engine)}</strong>
        &nbsp;·&nbsp; Provvigioni agenti <strong>${eur(T.agenti)}</strong></div>`;
-  // tabella per canale
-  h+=`<div class="panel"><table><thead><tr>
+  // tabella per canale — in un pannello collassabile (apri/chiudi) con scroll interno
+  h+=`<details class="sez" open><summary>Dettaglio per canale<span class="cnt">${(d.righe||[]).length} canali · ${eur(T.commerciali)}</span></summary>
+       <div class="panel" style="padding:0"><div style="max-height:60vh;overflow:auto"><table class="sticky"><thead><tr>
        <th>Canale</th><th class="num">Fatturato</th>
        <th class="num">Commissioni marketplace</th><th class="num">Piattaforma marketplace</th>
        <th class="num">Provvigioni agenti</th><th class="num">Tot. commerciali</th><th class="num">% su fatturato</th>
@@ -2632,16 +2633,17 @@ async function caricaCommerciali(){
       <td class="num">${eur(T.ricavo)}</td><td class="num">${eur(T.provvigioni)}</td>
       <td class="num">${eur(T.channel_engine)}</td><td class="num">${eur(T.agenti)}</td>
       <td class="num">${eur(T.commerciali)}</td><td class="num">${pc(T.commerciali,T.ricavo)}</td></tr>`;
-  h+=`</tbody></table></div>`;
-  // riconciliazione vs oracolo — solo in modalità validazione
+  h+=`</tbody></table></div></div></details>`;
+  // riconciliazione vs oracolo — pannello collassabile (chiuso) e solo in modalità validazione
   const dl=(nostro,orc)=>{ const x=(nostro||0)-(orc||0); return `${eur(orc)} <span class="muted">(Δ ${x>=0?'+':''}${eur(x)})</span>`; };
-  h+=`<div class="panel solo-validazione"><h3 style="margin:.2em 0">🔧 Riconciliazione con l'oracolo (Qlik) — stesse righe, stesso segno</h3>
+  h+=`<details class="sez solo-validazione"><summary>🔧 Riconciliazione con l'oracolo (Qlik)<span class="cnt">stesse righe, stesso segno</span></summary>
+      <div class="panel">
       <p class="muted" style="margin-top:0">Controllo di validazione: confronto delle nostre voci con i campi storici di <code>KB_SaleDocDetailDatiAggiuntivi</code>. Gli scarti residui delle commissioni sono la quota sul trasporto recuperato (noi sulla riga prodotto, l'oracolo sulla riga di trasporto).</p>
       <table><thead><tr><th>Voce</th><th class="num">Nostro</th><th class="num">Oracolo (Δ)</th></tr></thead><tbody>
       <tr><td>Commissioni marketplace</td><td class="num">${eur(T.provvigioni)}</td><td class="num">${dl(T.provvigioni,O.provvigioni)}</td></tr>
       <tr><td>Piattaforma marketplace (ChannelEngine)</td><td class="num">${eur(T.channel_engine)}</td><td class="num">${dl(T.channel_engine,O.channel_engine)}</td></tr>
       <tr><td>Provvigioni agenti</td><td class="num">${eur(T.agenti)}</td><td class="num">${dl(T.agenti,O.agenti)}</td></tr>
-      </tbody></table></div>`;
+      </tbody></table></div></details>`;
   $("#commerciali").innerHTML=h;
 }
 async function caricaCosto0(){
