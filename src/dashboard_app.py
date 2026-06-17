@@ -2212,6 +2212,9 @@ CE_DIMS = {
     "tipo_articolo": "COALESCE(ity.Description, it.ItemType, '(n/d)')",
     "linea_articolo":"COALESCE(hc.Description, it.HomogeneousCtg, '(n/d)')",
     "mese":          "RIGHT('0'+CAST(f.mese AS varchar(2)),2)",
+    "tipo_documento":"CASE sd.DocumentType WHEN '3407876' THEN 'Accredito' WHEN '3407873' THEN 'Sostituzione gratuita'"
+                     " WHEN '3407877' THEN 'Resi da clienti' WHEN '3407874' THEN 'Fattura' WHEN '3407875' THEN 'Fattura'"
+                     " WHEN '3407878' THEN 'Ricevuta' ELSE '(altro)' END",
 }
 CE_JOINS = """
         FROM core.fatto_riga f
@@ -3467,7 +3470,7 @@ async function caricaCE(){
   const tot=d.righe.reduce((s,r)=>({f:s.f+Number(r.fatturato||0),ma:s.ma+Number(r.materiale||0),co:s.co+Number(r.commerciali||0),tr:s.tr+Number(r.trasporto||0)}),{f:0,ma:0,co:0,tr:0});
   tot.mg = tot.f - tot.ma - tot.co - tot.tr;   // Margine = residuo: Fatturato − Materiale − Commerciali − Trasporto
   const pct=v=>tot.f?(100*v/tot.f).toFixed(1)+'%':'0%';
-  const dims=[['canale','Canale'],['dipartimento','Dipartimento'],['cliente','Cliente'],['agente','Agente'],['tipo_articolo','Tipo Articolo'],['linea_articolo','Linea Articolo'],['mese','Mese']];
+  const dims=[['canale','Canale'],['dipartimento','Dipartimento'],['cliente','Cliente'],['agente','Agente'],['tipo_articolo','Tipo Articolo'],['linea_articolo','Linea Articolo'],['mese','Mese'],['tipo_documento','Tipo documento']];
   const etich=dims.find(x=>x[0]===CEDIM)[1];
   let h=`<div class="cards">
     <div class="kpi"><div class="v">${eur(tot.f)}</div><div class="l">Fatturato</div></div>
