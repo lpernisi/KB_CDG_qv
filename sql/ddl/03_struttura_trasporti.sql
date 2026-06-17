@@ -62,7 +62,7 @@ BEGIN
     CREATE TABLE cfg.trasporto_stima_peso (
         id           INT IDENTITY(1,1) NOT NULL,
         canale       NVARCHAR(40)  NOT NULL CONSTRAINT DF_tsp_canale DEFAULT N'*',  -- es. 'Amazon','Leroy Merlin','BTOB tradizionale' o '*'
-        area         NVARCHAR(20)  NOT NULL CONSTRAINT DF_tsp_area   DEFAULT N'*',  -- 'ITALIA' | 'ESTERO' | '*'
+        area         NVARCHAR(20)  NOT NULL CONSTRAINT DF_tsp_area   DEFAULT N'*',  -- 'ITALIA' | nome Paese (es. 'FRANCIA') | 'ESTERO' generico | '*' (qualsiasi)
         peso_da_kg   DECIMAL(10,3) NOT NULL CONSTRAINT DF_tsp_pda DEFAULT 0,        -- estremo inferiore incluso
         peso_a_kg    DECIMAL(10,3) NOT NULL,                                        -- estremo superiore ESCLUSO
         costo_eur    DECIMAL(18,2) NOT NULL,

@@ -1,0 +1,73 @@
+﻿# Tariffa di trasporto - livello 1 (stima per fascia di peso).
+# Formato: separatore ';', decimali con ',', date 'YYYY-MM-DD', encoding UTF-8.
+# Colonne: canale;area;peso_da_kg;peso_a_kg;costo_eur;valido_dal;note
+#   canale: '*'=qualsiasi, oppure nome canale (es. 'Amazon').
+#   area:   'ITALIA' | nome Paese (es. 'FRANCIA') | 'ESTERO' (altri Paesi) | '*'.
+#   peso_da_kg incluso, peso_a_kg escluso. costo_eur = costo di UNA spedizione.
+#   Per aggiornare: rigenerare/duplicare con un valido_dal NUOVO e reimportare.
+canale;area;peso_da_kg;peso_a_kg;costo_eur;valido_dal;note
+*;ITALIA;0;1;5,25;2026-01-01;base mediana 2026 n=189
+*;ITALIA;1;2;5,57;2026-01-01;base mediana 2026 n=315
+*;ITALIA;2;5;5,92;2026-01-01;base mediana 2026 n=686
+*;ITALIA;5;10;8,98;2026-01-01;base mediana 2026 n=940
+*;ITALIA;10;20;10,91;2026-01-01;base mediana 2026 n=806
+*;ITALIA;20;30;13,65;2026-01-01;base mediana 2026 n=1998
+*;ITALIA;30;50;19,99;2026-01-01;base mediana 2026 n=2989
+*;ITALIA;50;100;28,07;2026-01-01;base mediana 2026 n=1618
+*;ITALIA;100;9999;70,34;2026-01-01;base mediana 2026 n=303
+TRENTINER;ITALIA;30;50;24,26;2026-01-01;eccezione canale n=40 scost 21%
+Amazon;ITALIA;100;9999;51,82;2026-01-01;eccezione canale n=43 scost -26%
+General;ITALIA;100;9999;59,06;2026-01-01;eccezione canale n=34 scost -16%
+Non Registrati;ITALIA;100;9999;51,91;2026-01-01;eccezione canale n=36 scost -26%
+*;FRANCIA;0;1;7,77;2026-01-01;base mediana 2026 n=260
+*;FRANCIA;1;2;8,68;2026-01-01;base mediana 2026 n=105
+*;FRANCIA;2;5;8,95;2026-01-01;base mediana 2026 n=256
+*;FRANCIA;5;10;10,97;2026-01-01;base mediana 2026 n=216
+*;FRANCIA;10;20;14,50;2026-01-01;base mediana 2026 n=97
+*;FRANCIA;20;30;52,61;2026-01-01;base mediana 2026 n=336
+*;FRANCIA;30;50;51,23;2026-01-01;base mediana 2026 n=1225
+*;FRANCIA;50;100;65,01;2026-01-01;base mediana 2026 n=661
+*;FRANCIA;100;9999;125,21;2026-01-01;base mediana 2026 n=47
+Leroy Merlin;FRANCIA;2;5;10,68;2026-01-01;eccezione canale n=57 scost 19%
+MANOMANO;FRANCIA;2;5;10,68;2026-01-01;eccezione canale n=33 scost 19%
+*;GERMANIA;0;1;7,77;2026-01-01;base mediana 2026 n=158
+*;GERMANIA;1;2;8,68;2026-01-01;base mediana 2026 n=161
+*;GERMANIA;2;5;10,68;2026-01-01;base mediana 2026 n=145
+*;GERMANIA;5;10;10,97;2026-01-01;base mediana 2026 n=114
+*;GERMANIA;10;20;38,46;2026-01-01;base mediana 2026 n=102
+*;GERMANIA;20;30;57,17;2026-01-01;base mediana 2026 n=172
+*;GERMANIA;30;50;58,93;2026-01-01;base mediana 2026 n=434
+*;GERMANIA;50;100;83,59;2026-01-01;base mediana 2026 n=371
+*;GERMANIA;100;9999;132,57;2026-01-01;base mediana 2026 n=35
+Hornbach;GERMANIA;2;5;8,95;2026-01-01;eccezione canale n=49 scost -16%
+Amazon;GERMANIA;30;50;74,21;2026-01-01;eccezione canale n=91 scost 26%
+*;PORTOGALLO;20;30;57,54;2026-01-01;base mediana 2026 n=38
+*;PORTOGALLO;30;50;88,24;2026-01-01;base mediana 2026 n=61
+*;PORTOGALLO;50;100;92,88;2026-01-01;base mediana 2026 n=47
+*;SPAGNA;0;1;8,18;2026-01-01;base mediana 2026 n=76
+*;SPAGNA;1;2;9,68;2026-01-01;base mediana 2026 n=25
+*;SPAGNA;2;5;12,52;2026-01-01;base mediana 2026 n=32
+*;SPAGNA;5;10;12,85;2026-01-01;base mediana 2026 n=62
+*;SPAGNA;10;20;16,69;2026-01-01;base mediana 2026 n=141
+*;SPAGNA;20;30;41,50;2026-01-01;base mediana 2026 n=121
+*;SPAGNA;30;50;42,98;2026-01-01;base mediana 2026 n=381
+*;SPAGNA;50;100;59,83;2026-01-01;base mediana 2026 n=191
+Amazon;SPAGNA;30;50;62,91;2026-01-01;eccezione canale n=116 scost 46%
+*;ESTERO;0;1;7,77;2026-01-01;base mediana 2026 n=505
+*;ESTERO;1;2;8,68;2026-01-01;base mediana 2026 n=304
+*;ESTERO;2;5;10,68;2026-01-01;base mediana 2026 n=455
+*;ESTERO;5;10;10,97;2026-01-01;base mediana 2026 n=413
+*;ESTERO;10;20;17,13;2026-01-01;base mediana 2026 n=356
+*;ESTERO;20;30;52,52;2026-01-01;base mediana 2026 n=691
+*;ESTERO;30;50;52,61;2026-01-01;base mediana 2026 n=2155
+*;ESTERO;50;100;72,69;2026-01-01;base mediana 2026 n=1302
+*;ESTERO;100;9999;128,30;2026-01-01;base mediana 2026 n=102
+*;*;0;1;7,57;2026-01-01;base mediana 2026 n=694
+*;*;1;2;7,77;2026-01-01;base mediana 2026 n=619
+*;*;2;5;6,32;2026-01-01;base mediana 2026 n=1141
+*;*;5;10;9,64;2026-01-01;base mediana 2026 n=1353
+*;*;10;20;12,07;2026-01-01;base mediana 2026 n=1162
+*;*;20;30;16,38;2026-01-01;base mediana 2026 n=2689
+*;*;30;50;30,34;2026-01-01;base mediana 2026 n=5144
+*;*;50;100;45,69;2026-01-01;base mediana 2026 n=2920
+*;*;100;9999;79,95;2026-01-01;base mediana 2026 n=405

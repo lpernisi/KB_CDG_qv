@@ -40,14 +40,16 @@ BEGIN
         WHERE fvr.tipo_spedizione = N'SPEDIZIONE' AND od.FatturaId IS NOT NULL
         GROUP BY od.FatturaId
     ),
-    -- documenti del periodo con peso (kit esplosi) / area / canale
+    -- documenti del periodo con peso (kit esplosi) / paese / macro (ITALIA-ESTERO) / canale
     doc AS (
-        SELECT sale_doc_id, peso_doc, area, canale, data_doc
+        SELECT sale_doc_id, peso_doc, paese, macro, canale, data_doc
         FROM kodice.vw_doc_trasporto
         WHERE anno = @anno AND mese = @mese
     ),
     -- LIVELLO 1: stima per fascia di peso = riga di config PIU' SPECIFICA e VALIDA alla data
-    -- del documento (canale/area esatti battono il jolly '*'; a parita', la valido_dal piu' recente).
+    -- del documento. Geografia a CASCATA: Paese specifico -> ESTERO generico -> '*' (qualsiasi);
+    -- analogamente il canale esatto batte il jolly '*'. A parita', vince la valido_dal piu' recente
+    -- (cosi' aggiornare la tariffa con una nuova data NON tocca il pregresso).
     liv1 AS (
         SELECT d.sale_doc_id, t.costo_eur AS costo
         FROM doc AS d
@@ -55,11 +57,11 @@ BEGIN
             SELECT TOP 1 c.costo_eur
             FROM cfg.trasporto_stima_peso AS c
             WHERE (c.canale = d.canale OR c.canale = N'*')
-              AND (c.area   = d.area   OR c.area   = N'*')
+              AND (c.area = d.paese OR c.area = d.macro OR c.area = N'*')
               AND d.peso_doc >= c.peso_da_kg AND d.peso_doc < c.peso_a_kg
               AND c.valido_dal <= d.data_doc
             ORDER BY CASE WHEN c.canale = N'*' THEN 1 ELSE 0 END,
-                     CASE WHEN c.area   = N'*' THEN 1 ELSE 0 END,
+                     CASE WHEN c.area = d.paese THEN 0 WHEN c.area = d.macro THEN 1 ELSE 2 END,
                      c.valido_dal DESC
         ) AS t
     ),

@@ -1891,6 +1891,23 @@ def api_trasporto_importa():
     return jsonify(esito)
 
 
+@app.post("/api/trasporto_importa_tutto")
+def api_trasporto_importa_tutto():
+    """Importa l'INTERO file dei vettori in src.fattura_vettore_riga, senza selezione: carica
+    tutti i vettori/destini/periodi presenti nel file (replace idempotente per anno/mese/vettore/destino).
+    Comodo per il riepilogativo storico completo (un solo click invece della scelta passo-passo)."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "errore": "Nessun file ricevuto."}), 400
+    from src.import_fatture_vettori import importa
+    try:
+        esito = importa(cfg, f.read(), f.filename, None)   # filtri None = tutto il file
+    except Exception as e:
+        return jsonify({"ok": False, "errore": str(e)}), 400
+    esito["ok"] = True
+    return jsonify(esito)
+
+
 @app.post("/api/trasporto_elabora")
 def api_trasporto_elabora():
     """(Ri)costruisce il ponte ordine->documento dell'anno e propaga il costo trasporto: per ogni mese
@@ -2392,9 +2409,10 @@ PAGINA = r"""<!DOCTYPE html>
         al <strong>documento</strong>, e si ripartisce sulle righe in proporzione al valore. Entra nel <strong>Margine di Contribuzione III</strong>.</p>
         <div class="solo-validazione" style="margin:10px 0;padding:10px;border:1px dashed var(--line);border-radius:8px">
           <strong>🔧 Caricamento riepilogativo vettori</strong>
-          <p class="muted" style="margin:4px 0 8px">File CSV o Excel scaricato da Google Sheet. <strong>Passo 1</strong>: leggi il file; <strong>passo 2</strong>: scegli vettore, destino e periodo da importare (come nella vecchia maschera); <strong>passo 3</strong>: importa ed elabora.</p>
+          <p class="muted" style="margin:4px 0 8px">File CSV o Excel scaricato da Google Sheet. <strong>Passo 1</strong>: leggi il file; <strong>passo 2</strong>: scegli vettore, destino e periodo da importare (come nella vecchia maschera); <strong>passo 3</strong>: importa ed elabora. <br>In alternativa <strong>⤓ Carica tutto il file</strong> importa l'intero riepilogativo (tutti i vettori e periodi) in un colpo solo, poi premi <strong>3 · Elabora e imputa</strong>.</p>
           <input type="file" id="traspFile" accept=".csv,.xlsx,.xls">
           <button onclick="trasportoLeggi()">1 · Leggi file</button>
+          <button onclick="trasportoImportaTutto()" title="Carica TUTTO il file (tutti i vettori, destini e periodi) senza selezione" style="margin-left:6px">⤓ Carica tutto il file</button>
           <div id="traspScelta" style="display:none;margin-top:8px;flex-wrap:wrap;gap:8px;align-items:end">
             <label>Vettore<br><select id="traspVettore"></select></label>
             <label>Destino<br><select id="traspDestino"></select></label>
@@ -2842,6 +2860,20 @@ async function trasportoImporta(){
     caricaTrasporti();
   }catch(e){ msg.textContent='Errore: '+e; }
 }
+async function trasportoImportaTutto(){
+  const inp=$("#traspFile"); const msg=$("#traspMsg");
+  if(!inp.files.length){ msg.textContent='Scegli prima un file.'; return; }
+  if(!confirm('Carico TUTTO il file (tutti i vettori, destini e periodi presenti)? Le righe dei periodi presenti nel file vengono sostituite.')) return;
+  msg.textContent='Caricamento dell\'intero file in corso… può richiedere qualche minuto.';
+  const fd=new FormData(); fd.append('file', inp.files[0]);
+  try{
+    const r=await fetch('/api/trasporto_importa_tutto',{method:'POST',body:fd});
+    const d=await r.json();
+    if(!d.ok){ msg.textContent='Errore: '+(d.errore||'sconosciuto'); return; }
+    msg.textContent=d.messaggio+' Periodi: '+(d.periodi||[]).join(', ')+'. Ora premi "3 · Elabora e imputa".';
+    caricaTrasporti();
+  }catch(e){ msg.textContent='Errore: '+e; }
+}
 async function trasportoElabora(){
   const {a}=periodo(); const msg=$("#traspMsg");
   msg.textContent='Elaborazione (legame ordine→documento + imputazione)… può richiedere qualche minuto.';
@@ -2927,7 +2959,7 @@ async function caricaTrasportoCfg(){
     <input type="hidden" id="cfgId" value="0">
     <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin-top:6px">
       <label>Canale<br><select id="cfgCanale">${canOpts}</select></label>
-      <label>Area<br><select id="cfgArea"><option>*</option><option>ITALIA</option><option>ESTERO</option></select></label>
+      <label>Area<br><select id="cfgArea"><option>*</option><option>ITALIA</option><option>FRANCIA</option><option>GERMANIA</option><option>SPAGNA</option><option>PORTOGALLO</option><option>ESTERO</option></select></label>
       <label>Peso da (kg)<br><input id="cfgPda" type="number" step="0.001" value="0" style="width:90px"></label>
       <label>Peso a (kg)<br><input id="cfgPa" type="number" step="0.001" value="0" style="width:90px"></label>
       <label>Costo €<br><input id="cfgCosto" type="number" step="0.01" value="0" style="width:90px"></label>
