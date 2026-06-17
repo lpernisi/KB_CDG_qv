@@ -2075,20 +2075,34 @@ def api_trasporto_valid_drill():
     tipo = request.args.get("tipo", "stima")
     if tipo == "stima":
         return jsonify(righe("""
+            WITH nav AS (   -- data di spedizione per documento (via ordine -> stato ordini Mago)
+                SELECT od.FatturaId, MAX(noe.DataSpedizione) AS data_sped
+                FROM kodice.ordine_documento od
+                JOIN kodice.vw_ordini_non_evasi noe ON noe.NrOrdine = od.InternalOrdNo
+                WHERE od.FatturaId IS NOT NULL
+                GROUP BY od.FatturaId
+            )
             SELECT TOP 500 sd.DocNo AS documento,
+                   CASE sd.DocumentType WHEN '3407874' THEN 'F' WHEN '3407875' THEN 'F'
+                        WHEN '3407878' THEN 'R' WHEN '3407876' THEN 'N' WHEN '3407873' THEN 'S'
+                        ELSE '?' END AS tipo,
+                   COALESCE(cs.CompanyName, sd.CustSupp) AS cliente,
                    CASE WHEN sd.CustSupp='135774' THEN 'SAVINI'
                         ELSE COALESCE(NULLIF(LTRIM(RTRIM(ctg.Notes)),''), opt.Category, '(n/d)') END AS canale,
                    cr.origine, CONVERT(varchar(10), sd.DocumentDate, 103) AS data,
                    CAST(v.peso_doc AS DECIMAL(18,1)) AS peso_kg,
+                   ISNULL(CONVERT(varchar(20), nav.data_sped, 103), '— non spedito') AS spedito_il,
                    CAST(SUM(cr.importo) AS DECIMAL(18,2)) AS importo
             FROM core.componente_riga cr
             JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId=cr.sale_doc_id
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSupp cs ON cs.CustSupp=sd.CustSupp AND cs.CustSuppType=3211264
             LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions opt ON opt.Customer=sd.CustSupp AND opt.CustSuppType=3211264
             LEFT JOIN KODICEBAGNO_4.dbo.MA_CustomerCtg ctg ON ctg.Category=opt.Category
             LEFT JOIN kodice.vw_doc_trasporto v ON v.sale_doc_id=cr.sale_doc_id AND v.anno=cr.anno
+            LEFT JOIN nav ON nav.FatturaId = cr.sale_doc_id
             WHERE cr.anno=:a AND cr.mese BETWEEN 1 AND :m AND cr.codice_componente='TRASPORTO'
               AND cr.origine NOT LIKE 'Fattura vettore%'
-            GROUP BY sd.DocNo, sd.CustSupp, ctg.Notes, opt.Category, cr.origine, sd.DocumentDate, v.peso_doc
+            GROUP BY sd.DocNo, sd.DocumentType, cs.CompanyName, sd.CustSupp, ctg.Notes, opt.Category, cr.origine, sd.DocumentDate, v.peso_doc, nav.data_sped
             ORDER BY SUM(cr.importo) DESC""", a=a, m=m))
     if tipo == "nonattrib":
         return jsonify(righe("""
@@ -2653,9 +2667,11 @@ PAGINA = r"""<!DOCTYPE html>
         <div id="traspValid"></div>
       </div>
       <div class="panel">
-        <h2>Stima per fascia di peso <span class="muted" style="font-weight:400">(livello 1 — usata finché non arriva la fattura del vettore)</span></h2>
-        <p class="muted">Costo di una spedizione per <strong>canale</strong>, <strong>area</strong> (Italia/Estero) e <strong>fascia di peso</strong> (kg). Si applica al documento e si ripartisce sulle righe per valore. <code>*</code> = qualsiasi; vince la regola più specifica. La <strong>data di validità</strong> permette di aggiornare i valori senza cambiare i periodi già chiusi.</p>
-        <div id="traspCfg"></div>
+        <details class="tvbox" style="border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+          <summary style="cursor:pointer;list-style:none"><strong>Stima per fascia di peso</strong> <span class="muted" style="font-weight:400">(livello 1 — tariffa usata finché non arriva la fattura del vettore)</span></summary>
+          <p class="muted" style="margin-top:6px">Costo di una spedizione per <strong>canale</strong>, <strong>area</strong> (Italia/Paese/Estero) e <strong>fascia di peso</strong> (kg). Si applica al documento e si ripartisce sulle righe. <code>*</code> = qualsiasi; vince la regola più specifica. La <strong>data di validità</strong> permette di aggiornare i valori senza cambiare i periodi già chiusi.</p>
+          <div id="traspCfg"></div>
+        </details>
       </div></section>
     <section id="sec-imballi" class="sez-main" style="display:none"><h2 class="grp">Imballi</h2>
       <div class="panel"><p class="muted">🔧 In costruzione — costi di imballaggio attribuibili.</p></div></section>
@@ -3225,9 +3241,11 @@ async function trasportoElabora(){
 }
 // --- VALIDAZIONE costi di trasporto: 3 tabelle collassabili (totale + drill on demand) ----
 const _TV_DRILL = {
-  stima:       {cols:[['documento','Documento'],['canale','Canale'],['origine','Stima usata'],['data','Data'],['peso_kg','Peso kg','num'],['importo','Importo','eur']]},
+  stima:       {cols:[['documento','Documento'],['tipo','','tipo'],['cliente','Cliente'],['canale','Canale'],['origine','Stima usata'],['spedito_il','Spedito il'],['data','Data doc'],['peso_kg','Peso kg','num'],['importo','Importo','eur']]},
   nonattrib:   {cols:[['vettore','Vettore'],['riferimento','Rif. ordine'],['destinatario','Destinatario'],['nazione','Nazione'],['data','Data'],['motivo','Perché'],['importo','Importo','eur']]},
 };
+// badge tipo documento: F=Fattura, R=Ricevuta, N=Nota di credito, S=Sostituzione
+const _TIPO_DOC = {F:['Fattura','#1a7f37'],R:['Ricevuta','#0b6bcb'],N:['Nota di credito','#b3261e'],S:['Sostituzione','#8a6d00']};
 async function _trasportoDrill(tipo, el){
   if(el.dataset.loaded) return; el.dataset.loaded='1';
   const {a,m}=periodo();
@@ -3242,8 +3260,9 @@ async function _trasportoDrill(tipo, el){
   }
   const cfg=_TV_DRILL[tipo]; const rows=d||[];
   if(!rows.length){ body.innerHTML='<p class="muted">Nessuna riga: tutto a posto. ✅</p>'; return; }
+  const tipoBadge=v=>{const t=_TIPO_DOC[v]; return t?`<span title="${t[0]}" style="display:inline-block;width:18px;text-align:center;border-radius:4px;color:#fff;background:${t[1]};font-weight:700;font-size:11px">${esc(v)}</span>`:esc(v==null?'':String(v));};
   let h='<table><thead><tr>'+cfg.cols.map(c=>`<th class="${c[2]==='eur'||c[2]==='num'?'num':''}">${c[1]}</th>`).join('')+'</tr></thead><tbody>';
-  rows.forEach(r=>{ h+='<tr>'+cfg.cols.map(c=>{const v=r[c[0]]; const cl=(c[2]==='eur'||c[2]==='num')?'num':''; const t=c[2]==='eur'?eur(v):(c[2]==='num'?num(v):esc(v==null?'':String(v)));return `<td class="${cl}">${t}</td>`;}).join('')+'</tr>'; });
+  rows.forEach(r=>{ h+='<tr>'+cfg.cols.map(c=>{const v=r[c[0]]; const cl=(c[2]==='eur'||c[2]==='num')?'num':''; const t=c[2]==='eur'?eur(v):(c[2]==='num'?num(v):(c[2]==='tipo'?tipoBadge(v):esc(v==null?'':String(v))));return `<td class="${cl}">${t}</td>`;}).join('')+'</tr>'; });
   h+='</tbody></table>'; if(rows.length>=500) h+='<p class="muted">(prime 500 righe)</p>'; body.innerHTML=h;
 }
 async function caricaTrasportoValidazione(){
@@ -3291,21 +3310,24 @@ async function caricaTrasporti(){
     ['Riferimento non riconosciuto', s.rif_non_riconosciuto, 'Il riferimento sulla spedizione non corrisponde ad alcun ordine di vendita (riferimento mancante o errato nel file).'],
     ['Rientri / resi (voce separata)', s.rientri, 'Ritiri e rientri dai vettori: logistica dei resi, tenuta a parte per non alterare il margine della singola vendita.'],
   ];
-  const tot=Number(s.totale)||0;
-  let h=`<h2 class="grp" style="margin-top:14px">Dove è finito il costo dei vettori — spedizioni di ${a}-${String(m).padStart(2,'0')}</h2>`;
-  h+=`<div class="banner ok" style="font-size:13.5px;margin-bottom:10px">Costo vettori del mese <strong>${eur(tot)}</strong> su <strong>${num(s.n_spedizioni)}</strong> spedizioni. Ogni euro è classificato qui sotto (i totali tornano).</div>`;
-  h+=`<div class="panel"><table><thead><tr><th>Voce</th><th class="num">Importo</th><th class="num">%</th><th>Perché</th></tr></thead><tbody>`;
+  const tot=Number(s.totale)||0; const mm=`${a}-${String(m).padStart(2,'0')}`;
+  let h=`<div class="banner ok" style="font-size:13.5px;margin-bottom:10px">Costo vettori del mese <strong>${eur(tot)}</strong> su <strong>${num(s.n_spedizioni)}</strong> spedizioni. Ogni euro è classificato qui sotto (i totali tornano).</div>`;
+  h+=`<table><thead><tr><th>Voce</th><th class="num">Importo</th><th class="num">%</th><th>Perché</th></tr></thead><tbody>`;
   rows.forEach(r=>{ const v=Number(r[1])||0; const pct=tot?(100*v/tot):0;
     h+=`<tr><td>${r[0]}</td><td class="num">${eur(v)}</td><td class="num">${pct.toFixed(1)}%</td><td class="muted">${r[2]}</td></tr>`; });
   h+=`<tr style="font-weight:700;border-top:2px solid var(--line);background:#faf8f2"><td>Totale</td><td class="num">${eur(tot)}</td><td class="num">100,0%</td><td></td></tr>`;
-  h+=`</tbody></table></div>`;
+  h+=`</tbody></table>`;
   h+=`<p class="muted">Imputato a MdC III per i documenti di questo mese: <strong>${eur(imp.importo)}</strong> su ${num(imp.righe)} righe. <span class="solo-validazione">🔧 Nota: l'imputato segue il mese del DOCUMENTO (la spedizione può precedere/seguire la fattura di qualche giorno), quindi può differire dall'agganciato del mese di spedizione finché non sono caricati tutti i mesi.</span></p>`;
   if((d.vettori||[]).length){
-    h+=`<div class="panel"><h2>Per vettore</h2><table><thead><tr><th>Vettore</th><th class="num">Spedizioni</th><th class="num">Costo</th></tr></thead><tbody>`;
+    h+=`<h2>Per vettore</h2><table><thead><tr><th>Vettore</th><th class="num">Spedizioni</th><th class="num">Costo</th></tr></thead><tbody>`;
     d.vettori.forEach(v=>{ h+=`<tr><td>${esc(v.vettore)}</td><td class="num">${num(v.n)}</td><td class="num">${eur(v.tot)}</td></tr>`; });
-    h+=`</tbody></table></div>`;
+    h+=`</tbody></table>`;
   }
-  box.innerHTML=h;
+  box.innerHTML=`<details class="tvbox" style="border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:6px 10px">`
+    +`<summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px;list-style:none">`
+    +`<strong>Dove è finito il costo dei vettori — spedizioni di ${mm}</strong>`
+    +`<span style="font-weight:700">${eur(tot)} · ${num(s.n_spedizioni)} sped.</span></summary>`
+    +`<div style="margin-top:8px">${h}</div></details>`;
 }
 async function caricaTrasportoCaricamenti(){
   const box=$("#traspCaric"); if(!box) return;
@@ -3313,17 +3335,22 @@ async function caricaTrasportoCaricamenti(){
   let h=`<h2 class="grp" style="margin-top:14px">Caricamenti effettuati `;
   h+=`<button onclick="trasportoElabora()" title="Ricostruisce il legame ordine→documento e imputa il costo ai margini per tutti i mesi caricati">Elabora e imputa tutto</button></h2>`;
   if(!c.length){ box.innerHTML=h+`<p class="muted">Nessuna fattura vettore ancora caricata. Usa il riquadro qui sopra (Leggi file → Importa).</p>`; return; }
-  h+=`<div class="panel"><table><thead><tr><th>Periodo spedizione</th><th>Vettore</th><th>Destino</th><th class="num">Spedizioni</th><th class="num">Costo</th><th>Caricato il</th><th>Imputato?</th><th></th></tr></thead><tbody>`;
+  const totCar=c.reduce((s,x)=>s+(Number(x.totale)||0),0), nCar=c.reduce((s,x)=>s+(Number(x.n_spedizioni)||0),0);
+  let tab=`<table><thead><tr><th>Periodo spedizione</th><th>Vettore</th><th>Destino</th><th class="num">Spedizioni</th><th class="num">Costo</th><th>Caricato il</th><th>Imputato?</th><th></th></tr></thead><tbody>`;
   c.forEach(x=>{
     const mm=`${x.anno}-${String(x.mese).padStart(2,'0')}`;
     const stato = x.elaborato ? '<span style="color:#2f7d52">✓ sì</span>' : '<span style="color:#e0a800">— no, premi «Elabora e imputa»</span>';
-    h+=`<tr><td>${mm}</td><td>${esc(x.vettore)}</td><td>${esc(x.destino)}</td>
+    tab+=`<tr><td>${mm}</td><td>${esc(x.vettore)}</td><td>${esc(x.destino)}</td>
       <td class="num">${num(x.n_spedizioni)}</td><td class="num">${eur(x.totale)}</td>
       <td class="muted">${esc(x.caricato_il||'')}</td><td>${stato}</td>
       <td><button onclick='trasportoRimuovi(${JSON.stringify({anno:x.anno,mese:x.mese,vettore:x.vettore,destino:x.destino})})' title="Rimuovi questa fattura dalla landing (per ricaricarla)">🗑</button></td></tr>`;
   });
-  h+=`</tbody></table></div>`;
-  box.innerHTML=h;
+  tab+=`</tbody></table>`;
+  box.innerHTML=h+`<details class="tvbox" style="border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:6px 10px">`
+    +`<summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px;list-style:none">`
+    +`<strong>Registro caricamenti <span class="muted" style="font-weight:400">(${c.length} periodi)</span></strong>`
+    +`<span style="font-weight:700">${eur(totCar)} · ${num(nCar)} sped.</span></summary>`
+    +`<div style="margin-top:8px">${tab}</div></details>`;
 }
 async function trasportoRimuovi(k){
   if(!confirm(`Rimuovere il caricato ${k.anno}-${String(k.mese).padStart(2,'0')} · ${k.vettore} · ${k.destino}?`)) return;
