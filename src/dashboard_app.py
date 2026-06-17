@@ -1498,75 +1498,65 @@ def api_riconciliazione_acquisti():
     fornitore del carico). Gli ONERI per MESE (è uno sfasamento di allocazione temporale). Stessa base
     di cambio sui due lati (come wap_ricalc) -> ogni differenza è solo tempo, non valuta."""
     anno, mda, ma = _ric_periodo()
+    from collections import defaultdict
     fn = lambda v: float(v or 0); r = lambda x: round(x, 2)
-    # ---- MERCE per fornitore: contabilità (testata fattura d'acquisto) vs carico magazzino (CustSupp) ----
-    rows = righe(f"""
-      WITH glm AS (
-        SELECT pd.Supplier AS CustSupp,
-          SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) gl_merce
-        FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+    # UNA SOLA scansione GL: merce (ACQUISTO) col fornitore dalla TESTATA fattura d'acquisto (LEFT JOIN:
+    # NULL = giroconto senza fattura) + oneri (ONERE_ACQUISTO). Aggregato per (fornitore, mese, ruolo);
+    # in Python si ripartisce: merce per fornitore, oneri per mese. (Prima erano 3 scansioni separate.)
+    gl_rows = righe("""
+        SELECT pd.Supplier AS sup, MONTH(g.AccrualDate) mese, q.Ruolo ruolo,
+               SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END) amt
+        FROM kodice.conti_quadratura q
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
         JOIN KODICEBAGNO_4.dbo.MA_JournalEntries je ON je.JournalEntryId=g.JournalEntryId
-        JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID
-        WHERE q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO' AND je.CRRefType=27066402
+        LEFT JOIN KODICEBAGNO_4.dbo.MA_PurchaseDoc pd ON pd.PurchaseDocId=je.CRRefID AND je.CRRefType=27066402
+        WHERE q.Componente='MATERIALE' AND q.Ruolo IN ('ACQUISTO','ONERE_ACQUISTO')
           AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
-        GROUP BY pd.Supplier),
-      car AS (
-        SELECT h.CustSupp, SUM(CASE WHEN (d.Qty<>0 OR h.InvRsn='ACQ-VALD') THEN {_CONV_EUR} ELSE 0 END) car_merce
+        GROUP BY pd.Supplier, MONTH(g.AccrualDate), q.Ruolo
+        OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma)
+    # UNA SOLA scansione magazzino: carico prodotti, merce (Qty<>0) e oneri (Qty=0) per (fornitore, mese).
+    inv_rows = righe(f"""
+        SELECT h.CustSupp AS sup, MONTH(h.PostingDate) mese,
+               SUM(CASE WHEN (d.Qty<>0 OR h.InvRsn='ACQ-VALD') THEN {_CONV_EUR} ELSE 0 END) merce,
+               SUM(CASE WHEN d.Qty=0 AND h.InvRsn<>'ACQ-VALD' THEN {_CONV_EUR} ELSE 0 END) oneri
         FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h
         JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
         JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='PRODOTTO'
         WHERE h.WAPMovementType=2032533505 AND h.CancelPhase1='0' AND h.CancelPhase2='0'
           AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
-        GROUP BY h.CustSupp)
-      SELECT ISNULL(glm.CustSupp,car.CustSupp) cod,
-             ISNULL(cs.CompanyName, ISNULL(glm.CustSupp,car.CustSupp)) fornitore,
-             ISNULL(glm.gl_merce,0) gl_merce, ISNULL(car.car_merce,0) car_merce
-      FROM glm FULL OUTER JOIN car ON car.CustSupp=glm.CustSupp
-      OUTER APPLY (SELECT TOP 1 CompanyName FROM KODICEBAGNO_4.dbo.MA_CustSupp
-                   WHERE CustSupp=ISNULL(glm.CustSupp,car.CustSupp)) cs
-      OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma)
+        GROUP BY h.CustSupp, MONTH(h.PostingDate)
+        OPTION (MAXDOP 1)""", a=anno, d=mda, h=ma)
+    nomi = {}   # nomi fornitore (dimensione, una lettura): primo non-vuoto per codice
+    for x in righe("SELECT CustSupp, CompanyName FROM KODICEBAGNO_4.dbo.MA_CustSupp"):
+        if x["CustSupp"] not in nomi and x["CompanyName"]:
+            nomi[x["CustSupp"]] = x["CompanyName"]
+    # ---- aggregazioni in Python ----
+    gl_merce = defaultdict(float); gl_oneri_mese = defaultdict(float)
+    for x in gl_rows:
+        if x["ruolo"] == "ACQUISTO": gl_merce[x["sup"]] += fn(x["amt"])     # sup None = giroconto senza fattura
+        else:                        gl_oneri_mese[x["mese"]] += fn(x["amt"])
+    car_merce = defaultdict(float); car_oneri_mese = defaultdict(float)
+    for x in inv_rows:
+        car_merce[x["sup"]] += fn(x["merce"]); car_oneri_mese[x["mese"]] += fn(x["oneri"])
+    # MERCE per fornitore (unione dei codici dei due lati)
     forn = []
-    for x in rows:
-        glm_, carm = fn(x["gl_merce"]), fn(x["car_merce"])
-        if abs(glm_) + abs(carm) < 0.005:
+    for cod in set(gl_merce) | set(car_merce):
+        g_, c_ = gl_merce.get(cod, 0.0), car_merce.get(cod, 0.0)
+        if abs(g_) + abs(c_) < 0.005:
             continue
-        forn.append({"cod": x["cod"], "fornitore": x["fornitore"],
-            "gl": r(glm_), "cdg": r(carm), "diff": r(glm_ - carm)})
-    # MERCE: totali GL completi (per quadrare al centesimo) e carico completo
-    gl_m_full = fn(righe("""SELECT ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
-        FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
-        WHERE q.Componente='MATERIALE' AND q.Ruolo='ACQUISTO'
-          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
-    car_m_full = fn(righe(f"""SELECT ISNULL(SUM(CASE WHEN (d.Qty<>0 OR h.InvRsn='ACQ-VALD') THEN {_CONV_EUR} ELSE 0 END),0) v
-        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
-        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='PRODOTTO'
-        WHERE h.WAPMovementType=2032533505 AND h.CancelPhase1='0' AND h.CancelPhase2='0'
-          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h""", a=anno, d=mda, h=ma)[0]["v"])
-    s_gl = sum(v["gl"] for v in forn); s_car = sum(v["cdg"] for v in forn)
-    res_gl, res_car = r(gl_m_full - s_gl), r(car_m_full - s_car)
-    if abs(res_gl) > 0.005 or abs(res_car) > 0.005:   # giroconti merce / carico senza fattura d'acquisto
-        forn.append({"cod": None, "fornitore": "(scritture sul conto merce senza fattura d'acquisto — giroconti)",
-            "gl": res_gl, "cdg": res_car, "diff": r(res_gl - res_car)})
+        nome = ("(scritture sul conto merce senza fattura d'acquisto — giroconti)"
+                if cod is None else nomi.get(cod, cod))
+        forn.append({"cod": cod, "fornitore": nome, "gl": r(g_), "cdg": r(c_), "diff": r(g_ - c_)})
     forn.sort(key=lambda v: -abs(v["diff"]))
-    # ---- ONERI accessori per MESE: contabilità (competenza) vs carico (allocazione) ----
-    glo = righe("""SELECT MONTH(g.AccrualDate) m, ISNULL(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),0) v
-        FROM kodice.conti_quadratura q JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
-        WHERE q.Componente='MATERIALE' AND q.Ruolo='ONERE_ACQUISTO'
-          AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN :d AND :h
-        GROUP BY MONTH(g.AccrualDate)""", a=anno, d=mda, h=ma)
-    caro = righe(f"""SELECT MONTH(h.PostingDate) m, ISNULL(SUM(CASE WHEN d.Qty=0 AND h.InvRsn<>'ACQ-VALD' THEN {_CONV_EUR} ELSE 0 END),0) v
-        FROM KODICEBAGNO_4.dbo.MA_InventoryEntries h JOIN KODICEBAGNO_4.dbo.MA_InventoryEntriesDetail d ON d.EntryId=h.EntryId
-        JOIN kodice.vw_classe_articolo ca ON ca.Item=LTRIM(RTRIM(d.Item)) AND ca.Classe='PRODOTTO'
-        WHERE h.WAPMovementType=2032533505 AND h.CancelPhase1='0' AND h.CancelPhase2='0'
-          AND YEAR(h.PostingDate)=:a AND MONTH(h.PostingDate) BETWEEN :d AND :h
-        GROUP BY MONTH(h.PostingDate)""", a=anno, d=mda, h=ma)
-    gm = {x["m"]: fn(x["v"]) for x in glo}; cm = {x["m"]: fn(x["v"]) for x in caro}
-    oneri_mesi = [{"mese": mm, "gl": r(gm.get(mm, 0)), "cdg": r(cm.get(mm, 0)), "diff": r(gm.get(mm, 0) - cm.get(mm, 0))}
+    gl_m_full = r(sum(gl_merce.values())); car_m_full = r(sum(car_merce.values()))
+    # ONERI accessori per MESE
+    oneri_mesi = [{"mese": mm, "gl": r(gl_oneri_mese.get(mm, 0)), "cdg": r(car_oneri_mese.get(mm, 0)),
+                   "diff": r(gl_oneri_mese.get(mm, 0) - car_oneri_mese.get(mm, 0))}
                   for mm in range(mda, ma + 1)]
-    o_gl = r(sum(gm.values())); o_car = r(sum(cm.values()))
+    o_gl = r(sum(gl_oneri_mese.values())); o_car = r(sum(car_oneri_mese.values()))
     return jsonify({
         "fornitori": forn, "oneri_mesi": oneri_mesi,
-        "merce": {"gl": r(gl_m_full), "cdg": r(car_m_full), "diff": r(gl_m_full - car_m_full)},
+        "merce": {"gl": gl_m_full, "cdg": car_m_full, "diff": r(gl_m_full - car_m_full)},
         "oneri": {"gl": o_gl, "cdg": o_car, "diff": r(o_gl - o_car)},
         "totale": {"gl": r(gl_m_full + o_gl), "cdg": r(car_m_full + o_car), "diff": r((gl_m_full + o_gl) - (car_m_full + o_car))}})
 
