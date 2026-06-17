@@ -2632,18 +2632,18 @@ async function caricaRiconc(){
   h+=rrow(byk('spiegato'),false,null)+rrow(byk('non_giust'),false,null)+rrow(byk('bilancio'),false,null);
   h+=`</tbody></table></div>`;
   const imb=d.imballaggi||{};
-  // DUE SCHEMI AFFIANCATI: stessa identita' (Rim.iniz + Acquisti − Rim.fin = Consumo) per Contabilita' e CDG.
-  const noCons=Number(no.acquisti_carico||0)+Number(no.rim_iniz||0)-Number(no.rim_fin||0);
+  // DUE SCHEMI AFFIANCATI: i tre blocchi che compongono il consumo (rimanenze iniziali, acquisti,
+  // rimanenze finali) a Contabilita' vs CDG, con Δ. NIENTE riga "= Consumo": il consumo CDG fisico
+  // (acquisti±rimanenze) NON e' il COGS da cui parte il ponte, quindi quel totale sarebbe un numero orfano.
   const dlt=(x,y)=>{const v=Number(x||0)-Number(y||0); return `<td class="num" style="${Math.abs(v)>0.5?'color:#b00;font-weight:600':'color:#2f7d52'}">${eur(v)}</td>`;};
   h+=`<div class="panel solo-validazione"><div class="valbadge">🔧 strumento di validazione</div>
-      <h2>Consumo materie · Contabilità vs CDG <span class="muted" style="font-weight:400">(solo PRODOTTI)</span></h2>
+      <h2>Rimanenze e acquisti · Contabilità vs CDG <span class="muted" style="font-weight:400">(solo PRODOTTI)</span></h2>
       <table><thead><tr><th>Voce</th><th class="num">Contabilità</th><th class="num">CDG</th><th class="num">Δ</th></tr></thead><tbody>
       <tr><td>Rimanenze iniziali</td><td class="num">${eur(co.rim_iniz)}</td><td class="num">${eur(no.rim_iniz)}</td>${dlt(co.rim_iniz,no.rim_iniz)}</tr>
-      <tr><td>+ Acquisti del periodo</td><td class="num">${eur(co.acquisti)}</td><td class="num">${eur(no.acquisti_carico)}</td>${dlt(co.acquisti,no.acquisti_carico)}</tr>
-      <tr><td>− Rimanenze finali</td><td class="num">${eur(co.rim_fin)}</td><td class="num">${eur(no.rim_fin)}</td>${dlt(co.rim_fin,no.rim_fin)}</tr>
-      <tr style="font-weight:700;border-top:2px solid var(--line)"><td>= Consumo di materie</td><td class="num">${eur(co.consumo)}</td><td class="num">${eur(noCons)}</td>${dlt(co.consumo,noCons)}</tr>
+      <tr><td>Acquisti del periodo</td><td class="num">${eur(co.acquisti)}</td><td class="num">${eur(no.acquisti_carico)}</td>${dlt(co.acquisti,no.acquisti_carico)}</tr>
+      <tr><td>Rimanenze finali</td><td class="num">${eur(co.rim_fin)}</td><td class="num">${eur(no.rim_fin)}</td>${dlt(co.rim_fin,no.rim_fin)}</tr>
       </tbody></table>
-      <div class="banner ok" style="margin-top:10px;font-size:12.5px">Stessa identità sui due lati (<strong>Rim. iniziali + Acquisti − Rim. finali = Consumo</strong>). La colonna Δ mostra dove i due mondi divergono — tipicamente sulle <strong>rimanenze iniziali</strong> (valorizzazione d'apertura). Ponte <strong>prodotti-contro-prodotti</strong> (imballaggi 997 esclusi).</div>
+      <div class="banner ok" style="margin-top:10px;font-size:12.5px">Confronto dei tre blocchi a Contabilità e a CDG: la colonna Δ mostra dove i due mondi divergono — soprattutto sulle <strong>rimanenze iniziali</strong> (valorizzazione d'apertura). Queste differenze sono poi <strong>assorbite dalle voci del ponte</strong> a sinistra. Prodotti-contro-prodotti (imballaggi 997 esclusi).</div>
       </div></div>`;
   h+=`<div class="panel" style="margin-top:14px">
       <h2>Imballaggi — contabilità ↔ magazzino, per fornitore</h2>
