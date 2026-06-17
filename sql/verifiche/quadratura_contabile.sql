@@ -43,3 +43,27 @@ USING (VALUES
 WHEN NOT MATCHED THEN INSERT (Componente, Account, Ruolo, Nota)
      VALUES (s.Componente, s.Account, s.Ruolo, s.Nota);
 GO
+
+-- Seed TRASPORTO (spese di spedizione sulle VENDITE: i vettori in uscita, conti 060216xx).
+-- E' il costo REALE fatturato dai vettori e registrato in contabilita': si confronta col nostro
+-- componente TRASPORTO (core.componente_riga). NB: i conti 06014/06015 (trasporti su ACQUISTI/import)
+-- restano nel MATERIALE, NON qui.
+MERGE kodice.conti_quadratura AS t
+USING (VALUES
+    ('TRASPORTO','06021600','COSTO','Spese di spedizione'),
+    ('TRASPORTO','06021601','COSTO','Spese di spedizione Italia'),
+    ('TRASPORTO','06021602','COSTO','Spese di spedizione Francia'),
+    ('TRASPORTO','06021603','COSTO','Spese di spedizione Germania'),
+    ('TRASPORTO','06021604','COSTO','Spese di spedizione Spagna'),
+    ('TRASPORTO','06021605','COSTO','Spese di spedizione Estero'),
+    ('TRASPORTO','06021606','COSTO','Spese di spedizione resi da Amazon'),
+    ('TRASPORTO','06021607','COSTO','Spese di spedizione Portogallo'),
+    ('TRASPORTO','06021610','COSTO','Spese di spedizione B2B'),
+    ('TRASPORTO','06021611','COSTO','Spese di spedizione GDO - Tecnomat'),
+    ('TRASPORTO','06021612','COSTO','Spese spedizione Amazon Logistica'),
+    ('TRASPORTO','06021613','COSTO','Spese spedizione ManoMano FF')
+) AS s (Componente, Account, Ruolo, Nota)
+   ON t.Componente = s.Componente AND t.Account = s.Account
+WHEN NOT MATCHED THEN INSERT (Componente, Account, Ruolo, Nota)
+     VALUES (s.Componente, s.Account, s.Ruolo, s.Nota);
+GO

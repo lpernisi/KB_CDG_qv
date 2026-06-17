@@ -2028,6 +2028,96 @@ def api_trasporto_config_elimina():
     return jsonify({"ok": True})
 
 
+# ---- VALIDAZIONE / QUALITA' dei costi di trasporto (3 controlli, cumulativi gen->mese) -------
+# Conti contabili del trasporto vendite (060216xx): saldo DARE-AVERE per il periodo.
+_GL_TRASP = """
+    SELECT ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2)
+    FROM kodice.conti_quadratura q
+    JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+    WHERE q.Componente='TRASPORTO' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN 1 AND :m"""
+
+
+@app.get("/api/trasporto_validazione")
+def api_trasporto_validazione():
+    """Tre controlli di validita'/qualita' del costo di trasporto, CUMULATIVI da gennaio al mese scelto:
+      1) documenti col trasporto ancora su STIMA (non sulla fattura reale del vettore);
+      2) righe di fattura vettore NON attribuite ad alcun documento;
+      3) quadratura col costo in CONTABILITA' GENERALE (conti spese di spedizione)."""
+    a = int(request.args.get("anno")); m = int(request.args.get("mese") or 12)
+    stima = righe("""
+        SELECT CAST(SUM(importo) AS DECIMAL(18,2)) AS totale, COUNT(DISTINCT sale_doc_id) AS n_doc
+        FROM core.componente_riga
+        WHERE anno=:a AND mese BETWEEN 1 AND :m AND codice_componente='TRASPORTO'
+          AND origine NOT LIKE 'Fattura vettore%'""", a=a, m=m)
+    nonattrib = righe("""
+        SELECT CAST(SUM(fvr.totale) AS DECIMAL(18,2)) AS totale, COUNT(*) AS n_righe
+        FROM src.fattura_vettore_riga fvr
+        LEFT JOIN kodice.ordine_documento od ON od.InternalOrdNo = fvr.rif_ordine
+        WHERE fvr.anno=:a AND fvr.mese BETWEEN 1 AND :m AND fvr.tipo_spedizione='SPEDIZIONE'
+          AND (od.SaleOrdId IS NULL OR od.FatturaId IS NULL)""", a=a, m=m)
+    cdg = righe("""SELECT CAST(SUM(importo) AS DECIMAL(18,2)) AS t FROM core.componente_riga
+                   WHERE anno=:a AND mese BETWEEN 1 AND :m AND codice_componente='TRASPORTO'""", a=a, m=m)
+    cont = righe(_GL_TRASP, a=a, m=m)
+    f = lambda v: float(v or 0)
+    cdg_t = f(cdg[0]["t"] if cdg else 0); cont_t = f(cont[0][list(cont[0].keys())[0]] if cont else 0)
+    return jsonify({
+        "anno": a, "mese": m,
+        "stima":      {"totale": f(stima[0]["totale"]), "n": stima[0]["n_doc"] or 0},
+        "nonattrib":  {"totale": f(nonattrib[0]["totale"]), "n": nonattrib[0]["n_righe"] or 0},
+        "contabilita":{"cdg": cdg_t, "contabilita": cont_t, "delta": round(cdg_t - cont_t, 2)},
+    })
+
+
+@app.get("/api/trasporto_valid_drill")
+def api_trasporto_valid_drill():
+    """Dettaglio (drill) di uno dei 3 controlli: tipo = stima | nonattrib | contabilita."""
+    a = int(request.args.get("anno")); m = int(request.args.get("mese") or 12)
+    tipo = request.args.get("tipo", "stima")
+    if tipo == "stima":
+        return jsonify(righe("""
+            SELECT TOP 500 sd.DocNo AS documento,
+                   CASE WHEN sd.CustSupp='135774' THEN 'SAVINI'
+                        ELSE COALESCE(NULLIF(LTRIM(RTRIM(ctg.Notes)),''), opt.Category, '(n/d)') END AS canale,
+                   cr.origine, CONVERT(varchar(10), sd.DocumentDate, 103) AS data,
+                   CAST(v.peso_doc AS DECIMAL(18,1)) AS peso_kg,
+                   CAST(SUM(cr.importo) AS DECIMAL(18,2)) AS importo
+            FROM core.componente_riga cr
+            JOIN KODICEBAGNO_4.dbo.MA_SaleDoc sd ON sd.SaleDocId=cr.sale_doc_id
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustSuppCustomerOptions opt ON opt.Customer=sd.CustSupp AND opt.CustSuppType=3211264
+            LEFT JOIN KODICEBAGNO_4.dbo.MA_CustomerCtg ctg ON ctg.Category=opt.Category
+            LEFT JOIN kodice.vw_doc_trasporto v ON v.sale_doc_id=cr.sale_doc_id AND v.anno=cr.anno
+            WHERE cr.anno=:a AND cr.mese BETWEEN 1 AND :m AND cr.codice_componente='TRASPORTO'
+              AND cr.origine NOT LIKE 'Fattura vettore%'
+            GROUP BY sd.DocNo, sd.CustSupp, ctg.Notes, opt.Category, cr.origine, sd.DocumentDate, v.peso_doc
+            ORDER BY SUM(cr.importo) DESC""", a=a, m=m))
+    if tipo == "nonattrib":
+        return jsonify(righe("""
+            SELECT TOP 500 ISNULL(fvr.vettore,'(n/d)') AS vettore, fvr.rif_ordine AS riferimento,
+                   fvr.destinatario, fvr.nazione, CONVERT(varchar(10), fvr.data_spedizione, 103) AS data,
+                   CAST(fvr.totale AS DECIMAL(18,2)) AS importo,
+                   CASE WHEN od.SaleOrdId IS NULL THEN 'Riferimento non riconosciuto'
+                        ELSE 'Ordine non ancora fatturato' END AS motivo
+            FROM src.fattura_vettore_riga fvr
+            LEFT JOIN kodice.ordine_documento od ON od.InternalOrdNo = fvr.rif_ordine
+            WHERE fvr.anno=:a AND fvr.mese BETWEEN 1 AND :m AND fvr.tipo_spedizione='SPEDIZIONE'
+              AND (od.SaleOrdId IS NULL OR od.FatturaId IS NULL)
+            ORDER BY fvr.totale DESC""", a=a, m=m))
+    # contabilita: saldo per conto + lato nostro per origine (per leggere la differenza)
+    conti = righe("""
+        SELECT q.Account AS conto, q.Nota AS descrizione,
+               ROUND(SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END),2) AS contabilita
+        FROM kodice.conti_quadratura q
+        JOIN KODICEBAGNO_4.dbo.MA_JournalEntriesGLDetail g ON g.Account=q.Account
+        WHERE q.Componente='TRASPORTO' AND YEAR(g.AccrualDate)=:a AND MONTH(g.AccrualDate) BETWEEN 1 AND :m
+        GROUP BY q.Account, q.Nota HAVING SUM(CASE WHEN g.DebitCreditSign=4980736 THEN g.Amount ELSE -g.Amount END)<>0
+        ORDER BY q.Account""", a=a, m=m)
+    nostro = righe("""
+        SELECT origine, CAST(SUM(importo) AS DECIMAL(18,2)) AS importo
+        FROM core.componente_riga WHERE anno=:a AND mese BETWEEN 1 AND :m AND codice_componente='TRASPORTO'
+        GROUP BY origine ORDER BY origine""", a=a, m=m)
+    return jsonify({"conti": conti, "nostro_per_origine": nostro})
+
+
 # ---- Tabella di attribuzione delle COMMISSIONI marketplace (cfg.commissione_marketplace) ----
 @app.get("/api/commissione_config")
 def api_commissione_config():
@@ -2560,6 +2650,7 @@ PAGINA = r"""<!DOCTYPE html>
         </div>
         <div id="traspCaric"></div>
         <div id="traspRic"></div>
+        <div id="traspValid"></div>
       </div>
       <div class="panel">
         <h2>Stima per fascia di peso <span class="muted" style="font-weight:400">(livello 1 — usata finché non arriva la fattura del vettore)</span></h2>
@@ -3132,10 +3223,64 @@ async function trasportoElabora(){
     caricaTrasporti();
   }catch(e){ msg.textContent='Errore: '+e; }
 }
+// --- VALIDAZIONE costi di trasporto: 3 tabelle collassabili (totale + drill on demand) ----
+const _TV_DRILL = {
+  stima:       {cols:[['documento','Documento'],['canale','Canale'],['origine','Stima usata'],['data','Data'],['peso_kg','Peso kg','num'],['importo','Importo','eur']]},
+  nonattrib:   {cols:[['vettore','Vettore'],['riferimento','Rif. ordine'],['destinatario','Destinatario'],['nazione','Nazione'],['data','Data'],['motivo','Perché'],['importo','Importo','eur']]},
+};
+async function _trasportoDrill(tipo, el){
+  if(el.dataset.loaded) return; el.dataset.loaded='1';
+  const {a,m}=periodo();
+  const body=el.querySelector('.tvbody'); body.innerHTML='<p class="muted">Carico…</p>';
+  const d=await j(`/api/trasporto_valid_drill?tipo=${tipo}&anno=${a}&mese=${m}`);
+  if(tipo==='contabilita'){
+    let h='<table><thead><tr><th>Conto</th><th>Descrizione</th><th class="num">Contabilità</th></tr></thead><tbody>';
+    (d.conti||[]).forEach(r=>h+=`<tr><td>${esc(r.conto)}</td><td>${esc(r.descrizione)}</td><td class="num">${eur(r.contabilita)}</td></tr>`);
+    h+='</tbody></table><h2 style="margin-top:10px">Lato nostro (CDG) per origine</h2><table><thead><tr><th>Origine</th><th class="num">Importo</th></tr></thead><tbody>';
+    (d.nostro_per_origine||[]).forEach(r=>h+=`<tr><td>${esc(r.origine)}</td><td class="num">${eur(r.importo)}</td></tr>`);
+    h+='</tbody></table>'; body.innerHTML=h; return;
+  }
+  const cfg=_TV_DRILL[tipo]; const rows=d||[];
+  if(!rows.length){ body.innerHTML='<p class="muted">Nessuna riga: tutto a posto. ✅</p>'; return; }
+  let h='<table><thead><tr>'+cfg.cols.map(c=>`<th class="${c[2]==='eur'||c[2]==='num'?'num':''}">${c[1]}</th>`).join('')+'</tr></thead><tbody>';
+  rows.forEach(r=>{ h+='<tr>'+cfg.cols.map(c=>{const v=r[c[0]]; const cl=(c[2]==='eur'||c[2]==='num')?'num':''; const t=c[2]==='eur'?eur(v):(c[2]==='num'?num(v):esc(v==null?'':String(v)));return `<td class="${cl}">${t}</td>`;}).join('')+'</tr>'; });
+  h+='</tbody></table>'; if(rows.length>=500) h+='<p class="muted">(prime 500 righe)</p>'; body.innerHTML=h;
+}
+async function caricaTrasportoValidazione(){
+  const box=$("#traspValid"); if(!box) return;
+  const {a,m}=periodo(); const mm=`${a}-${String(m).padStart(2,'0')}`;
+  const d=await j(`/api/trasporto_validazione?anno=${a}&mese=${m}`);
+  const st=d.stima||{}, na=d.nonattrib||{}, co=d.contabilita||{};
+  const dlt=Number(co.delta)||0; const dltCls=Math.abs(dlt)<Math.max(1,(Number(co.contabilita)||0)*0.03)?'#1a7f37':'#b3261e';
+  const sez=(tipo,titolo,badge,sub,perche)=>`
+    <details class="tvbox" style="border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:6px 10px"
+       ontoggle="if(this.open)_trasportoDrill('${tipo}',this)">
+      <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px;list-style:none">
+        <span><strong>${titolo}</strong> <span class="muted" style="font-weight:400">${sub}</span></span>
+        <span style="font-weight:700">${badge}</span>
+      </summary>
+      <p class="muted" style="margin:6px 0 4px">${perche}</p>
+      <div class="tvbody"></div>
+    </details>`;
+  box.innerHTML = `<h2 class="grp" style="margin-top:14px">🔧 Validità e qualità del costo di trasporto <span class="muted" style="font-weight:400">— da gennaio a ${mm}</span></h2>`
+    + sez('stima','Documenti senza costo trasporto REALE',
+          `${eur(st.totale)} · ${num(st.n)} doc`,
+          '(ancora su STIMA, fattura vettore non arrivata/agganciata)',
+          'Costo di trasporto ancora STIMATO perché la fattura del vettore non è stata caricata o non si è agganciata. Sui mesi vecchi dovrebbe tendere a zero. Apri per vedere quali documenti e con che stima.')
+    + sez('nonattrib','Righe fattura vettore NON attribuite',
+          `${eur(na.totale)} · ${num(na.n)} righe`,
+          '(riferimento non riconosciuto o ordine non fatturato)',
+          'Spedizioni fatturate dal vettore che non si agganciano a un documento di vendita (riferimento errato/mancante, o ordine non ancora fatturato): costo reale che NON entra nel margine. Apri per il dettaglio.')
+    + sez('contabilita',`Quadratura con la Contabilità generale`,
+          `<span style="color:${dltCls}">CDG ${eur(co.cdg)} vs Contab. ${eur(co.contabilita)} · Δ ${eur(dlt)}</span>`,
+          '(conti spese di spedizione vendite)',
+          'Confronto tra il nostro costo di trasporto (CDG) e il costo realmente registrato in Contabilità generale. La differenza è soprattutto la quota STIMATA non ancora fatturata/registrata. Apri per il dettaglio per conto.');
+}
 async function caricaTrasporti(){
   // il pannello stime e il registro caricamenti si vedono SEMPRE (anche se il periodo è vuoto)
   caricaTrasportoCfg();
   caricaTrasportoCaricamenti();
+  caricaTrasportoValidazione();
   const {a,m}=periodo(); const box=$("#traspRic"); if(!box) return;
   const d=await j(`/api/trasporto_riconciliazione?anno=${a}&mese=${m}`);
   const s=d.sintesi||{}, imp=d.imputato||{};
